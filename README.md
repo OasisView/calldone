@@ -22,7 +22,7 @@ Early development. Demo mode by default; real outbound calls require phone verif
 ### Prerequisites
 - Node.js 20+
 - npm 10+
-- Supabase CLI (`brew install supabase/tap/supabase`) — only needed when working with migrations
+- Supabase CLI (`brew install supabase/tap/supabase`), only needed when working with migrations
 - A Supabase project (create one at https://supabase.com)
 
 ### Setup
