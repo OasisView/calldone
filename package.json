@@ -10,7 +10,8 @@
     "lint": "eslint .",
     "typecheck": "tsc -b --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:edge": "deno test --allow-env supabase/functions"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",

@@ -1,16 +1,12 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js"
 
-// NOTE: the browser-local demo never calls this. It exists for the future
-// paid upgrade (see docs/contracts/). Lazy so that builds, tests, and SSG
-// pre-rendering work with no env vars configured.
-
 let client: SupabaseClient | null = null
 
 export function isSupabaseConfigured(): boolean {
   return Boolean(import.meta.env.VITE_SUPABASE_URL && import.meta.env.VITE_SUPABASE_ANON_KEY)
 }
 
-/** Lazy singleton. Throws only on first *use* without env, never at import time. */
+/** Lazy singleton. Throws only on first *use* without env, never at import time (keeps SSG/CI builds green). */
 export function getSupabase(): SupabaseClient {
   if (client) return client
   const url = import.meta.env.VITE_SUPABASE_URL

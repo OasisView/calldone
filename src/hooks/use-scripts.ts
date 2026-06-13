@@ -1,41 +1,55 @@
 import {
   useMutation,
   useQuery,
-  useQueryClient,
   type UseMutationResult,
   type UseQueryResult,
 } from "@tanstack/react-query"
+import type { CallScript } from "@/types/database"
+import type { ApiErrorBody } from "@/types/api"
+import { queryKeys } from "@/lib/query-keys"
 
-import { getScript, listScripts, updateScript } from "@/lib/demo/store"
-import type { DemoScript } from "@/lib/demo/types"
+type ApiError = ApiErrorBody["error"]
 
-const KEYS = {
-  all: ["demo-scripts"] as const,
-  detail: (id: string) => ["demo-scripts", id] as const,
+export function useScripts(): UseQueryResult<CallScript[], ApiError> {
+  return useQuery<CallScript[], ApiError>({
+    queryKey: queryKeys.scripts.all(""),
+    queryFn: async () => {
+      throw new Error("not implemented")
+    },
+    enabled: false,
+  })
 }
 
-export function useScripts(): UseQueryResult<DemoScript[]> {
-  return useQuery({ queryKey: KEYS.all, queryFn: () => listScripts() })
-}
-
-export function useScript(scriptId: string): UseQueryResult<DemoScript | null> {
-  return useQuery({
-    queryKey: KEYS.detail(scriptId),
-    queryFn: () => getScript(scriptId),
+export function useScript(scriptId: string): UseQueryResult<CallScript | null, ApiError> {
+  return useQuery<CallScript | null, ApiError>({
+    queryKey: queryKeys.scripts.detail(scriptId),
+    queryFn: async () => {
+      throw new Error("not implemented")
+    },
+    enabled: false,
   })
 }
 
 export function useUpdateScript(): UseMutationResult<
-  DemoScript | null,
-  Error,
+  CallScript,
+  ApiError,
   { scriptId: string; scriptText: string }
 > {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: async ({ scriptId, scriptText }) => updateScript(scriptId, { scriptText }),
-    onSuccess: (_, { scriptId }) => {
-      void queryClient.invalidateQueries({ queryKey: KEYS.all })
-      void queryClient.invalidateQueries({ queryKey: KEYS.detail(scriptId) })
+  return useMutation<CallScript, ApiError, { scriptId: string; scriptText: string }>({
+    mutationFn: async () => {
+      throw new Error("not implemented")
+    },
+  })
+}
+
+export function useToggleFavorite(): UseMutationResult<
+  CallScript,
+  ApiError,
+  { scriptId: string; isFavorite: boolean }
+> {
+  return useMutation<CallScript, ApiError, { scriptId: string; isFavorite: boolean }>({
+    mutationFn: async () => {
+      throw new Error("not implemented")
     },
   })
 }

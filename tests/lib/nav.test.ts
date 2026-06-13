@@ -10,46 +10,89 @@ describe("nav abstraction", () => {
     nav = createNavigator(mockNavigate)
   })
 
-  it("exposes route constants", () => {
-    expect(ROUTES.landing).toBe("/")
-    expect(ROUTES.dashboard).toBe("/dashboard")
-    expect(ROUTES.brainstorm).toBe("/brainstorm")
-    expect(ROUTES.scriptReview).toBe("/scripts/:scriptId")
-    expect(ROUTES.callDetail).toBe("/calls/:callLogId")
-    expect(ROUTES.notFound).toBe("*")
+  describe("ROUTES constants", () => {
+    it("exposes all 11 product routes plus the not-found wildcard", () => {
+      expect(ROUTES).toEqual({
+        landing: "/",
+        login: "/login",
+        signup: "/signup",
+        onboarding: "/onboarding",
+        dashboard: "/dashboard",
+        brainstorm: "/brainstorm",
+        scripts: "/scripts",
+        scriptReview: "/scripts/:scriptId",
+        calls: "/calls",
+        callDetail: "/calls/:callLogId",
+        profile: "/profile",
+        notFound: "*",
+      })
+    })
   })
 
-  it("toLanding navigates to /", () => {
-    nav.toLanding()
-    expect(mockNavigate).toHaveBeenCalledWith("/")
+  describe("static navigator methods", () => {
+    it.each([
+      ["toLanding", "/"],
+      ["toLogin", "/login"],
+      ["toSignup", "/signup"],
+      ["toOnboarding", "/onboarding"],
+      ["toDashboard", "/dashboard"],
+      ["toBrainstorm", "/brainstorm"],
+      ["toScripts", "/scripts"],
+      ["toCalls", "/calls"],
+      ["toProfile", "/profile"],
+    ] as const)("%s navigates to %s", (method, path) => {
+      ;(nav[method] as () => void)()
+      expect(mockNavigate).toHaveBeenCalledTimes(1)
+      expect(mockNavigate).toHaveBeenCalledWith(path)
+    })
   })
 
-  it("toDashboard navigates to /dashboard", () => {
-    nav.toDashboard()
-    expect(mockNavigate).toHaveBeenCalledWith("/dashboard")
+  describe("parameterized navigator methods", () => {
+    it("toScriptReview interpolates the script id", () => {
+      nav.toScriptReview("script-42")
+      expect(mockNavigate).toHaveBeenCalledWith("/scripts/script-42")
+    })
+
+    it("toScriptReview url-encodes the script id", () => {
+      nav.toScriptReview("abc 123")
+      expect(mockNavigate).toHaveBeenCalledWith("/scripts/abc%20123")
+    })
+
+    it("toCallDetail interpolates the call log id", () => {
+      nav.toCallDetail("log-9")
+      expect(mockNavigate).toHaveBeenCalledWith("/calls/log-9")
+    })
+
+    it("toCallDetail url-encodes the call log id", () => {
+      nav.toCallDetail("a/b?c")
+      expect(mockNavigate).toHaveBeenCalledWith("/calls/a%2Fb%3Fc")
+    })
   })
 
-  it("toBrainstorm navigates to /brainstorm", () => {
-    nav.toBrainstorm()
-    expect(mockNavigate).toHaveBeenCalledWith("/brainstorm")
+  describe("back", () => {
+    it("uses navigate(-1)", () => {
+      nav.back()
+      expect(mockNavigate).toHaveBeenCalledWith(-1)
+    })
   })
 
-  it("toScriptReview interpolates and encodes the script id", () => {
-    nav.toScriptReview("abc 123")
-    expect(mockNavigate).toHaveBeenCalledWith("/scripts/abc%20123")
-  })
+  describe("routePath", () => {
+    it("fills a single param", () => {
+      expect(routePath(ROUTES.scriptReview, { scriptId: "x1" })).toBe("/scripts/x1")
+    })
 
-  it("toCallDetail interpolates the call log id", () => {
-    nav.toCallDetail("log-9")
-    expect(mockNavigate).toHaveBeenCalledWith("/calls/log-9")
-  })
+    it("fills multiple params", () => {
+      expect(routePath("/a/:x/b/:y", { x: "1", y: "2" })).toBe("/a/1/b/2")
+    })
 
-  it("back uses navigate(-1)", () => {
-    nav.back()
-    expect(mockNavigate).toHaveBeenCalledWith(-1)
-  })
+    it("encodes param values", () => {
+      expect(routePath(ROUTES.callDetail, { callLogId: "id with space" })).toBe(
+        "/calls/id%20with%20space"
+      )
+    })
 
-  it("routePath fills multiple params", () => {
-    expect(routePath("/a/:x/b/:y", { x: "1", y: "2" })).toBe("/a/1/b/2")
+    it("leaves the template untouched when no params are given", () => {
+      expect(routePath(ROUTES.dashboard, {})).toBe("/dashboard")
+    })
   })
 })

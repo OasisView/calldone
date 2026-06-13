@@ -23,5 +23,5 @@
     },
     "types": ["vitest/globals", "@testing-library/jest-dom"]
   },
-  "include": ["src", "tests"]
+  "include": ["src", "tests", "supabase/functions/_shared/api-types.ts", "supabase/functions/_shared/ics.ts"]
 }
