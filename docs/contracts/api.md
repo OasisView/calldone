@@ -530,12 +530,13 @@ Audio is forwarded to Groq and **never stored anywhere** — no Supabase Storage
 Server behavior (frozen): the system prompt is built **only server-side** in
 `_shared/prompts.ts`. It always embeds the two mandatory disclosures so every finalized script
 contains them; their presence is additionally verified post-generation in code with a unit test
-(R22). For **non-anonymous** callers, the function reads `profiles` + `user_facts` using a
-**caller-JWT-scoped** supabase client (RLS enforced; no service role). For anonymous callers it
-uses a generic prompt.
+(R22). In this slice the prompt is built from the request `messages` + the disclosures only —
+**the function reads NO product tables** (per-user `user_facts` RAG personalization is a P5
+feature, not built here). This is enforced as a ws/edge acceptance gate (no `.from(` in the
+module, `security.md` §10 ws/edge #5).
 
-The function is **stateless** (R2): it never writes to the DB, and the finalize response carries
-script *content*, never a server-generated `script_id`. **The client persists everything**: the
+The function is **stateless** (R2): it never reads or writes the DB, and the finalize response
+carries script *content*, never a server-generated `script_id`. **The client persists everything**: the
 `use-brainstorm` hook inserts `brainstorm_sessions`, `call_scripts`, and upserts `user_facts`
 under RLS. Anonymous users skip the `user_facts` writes entirely — blocked by RLS and skipped
 client-side via `isAnonymous` checks (R8); they CAN persist their own `brainstorm_sessions` and

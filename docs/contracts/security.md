@@ -72,7 +72,7 @@ Plus one infrastructure table (§5): `private.rate_limits` — lives in the non-
 | Function | JWT | Anonymous allowed? | DB access | Extra checks |
 |---|---|---|---|---|
 | `whisper-transcribe` | required | yes | none | size/duration caps; rate limits |
-| `gemini-conversation` | required | yes | **none — stateless (R2)**; persistence is client-side under RLS | any user-facts context arrives in the request from the client (which read it under RLS); anonymous clients send none (R8); transcript caps; finalize response carries script *content*, never a server-generated id |
+| `gemini-conversation` | required | yes | **none — stateless (R2)**; persistence is client-side under RLS | reads NO product tables (per-user `user_facts` RAG is P5, not in this slice — grep-gated, §10 ws/edge #5); prompt = request messages + the mandatory disclosures; transcript caps; finalize response carries script *content*, never a server-generated id |
 | `elevenlabs-tts` | required | yes | rate-limit RPC only | char caps + global quota counter; 502/503 failure signal (§5.3) |
 | `make-call` | required | yes | caller-scoped read + service-role insert (R5) | **demo-only**: `resolveCallMode()` exists, its `"real"` arm returns `501 not_implemented`, and no Bland client code exists (R12); script ownership verified through the user-scoped client (RLS does the check) |
 | `call-webhook` | none | n/a | service-role update | HMAC signature, constant-time compare (§4) |
