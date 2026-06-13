@@ -93,17 +93,19 @@ export const TRANSCRIBE_ALLOWED_MIME_TYPES = [
 /** Fixed-window rate limits (R6), enforced via public.rate_limit_hit().
  *  window: 'hour' | 'day' | 'month' (date_trunc fixed windows). */
 export const RATE_LIMITS = {
-  makeCallPerIp: { limit: 5, window: "hour" }, //              spec §Demo Safety
-  makeCallPerAnonUser: { limit: 10, window: "day" },
-  makeCallPerUser: { limit: 20, window: "day" }, //            spec's daily cap
-  transcribePerUser: { limit: 30, window: "hour" },
-  transcribePerIp: { limit: 60, window: "hour" },
-  conversationPerUser: { limit: 60, window: "hour" },
-  conversationPerIp: { limit: 120, window: "hour" },
-  ttsRequestsPerUser: { limit: 20, window: "hour" },
-  ttsRequestsPerIp: { limit: 60, window: "hour" },
-  ttsCharsPerUser: { limit: 1_500, window: "day" },
-  ttsCharsGlobal: { limit: 9_000, window: "month" }, //        ElevenLabs free-tier guard
+  // `bucket` is the exact first argument to public.rate_limit_hit() — frozen
+  // here so edge code and contract docs cannot drift to different strings.
+  makeCallPerIp: { bucket: "make_call:ip", limit: 5, window: "hour" }, //         spec §Demo Safety
+  makeCallPerAnonUser: { bucket: "make_call:uid_anon", limit: 10, window: "day" },
+  makeCallPerUser: { bucket: "make_call:uid", limit: 20, window: "day" }, //      spec's daily cap
+  transcribePerUser: { bucket: "whisper:uid", limit: 30, window: "hour" },
+  transcribePerIp: { bucket: "whisper:ip", limit: 60, window: "hour" },
+  conversationPerUser: { bucket: "gemini:uid", limit: 60, window: "hour" },
+  conversationPerIp: { bucket: "gemini:ip", limit: 120, window: "hour" },
+  ttsRequestsPerUser: { bucket: "tts:uid", limit: 20, window: "hour" },
+  ttsRequestsPerIp: { bucket: "tts:ip", limit: 60, window: "hour" },
+  ttsCharsPerUser: { bucket: "tts_chars:uid", limit: 1_500, window: "day" },
+  ttsCharsGlobal: { bucket: "tts_chars:global", limit: 9_000, window: "month" }, // ElevenLabs free-tier guard
 } as const;
 export type RateLimitWindow = "hour" | "day" | "month";
 
