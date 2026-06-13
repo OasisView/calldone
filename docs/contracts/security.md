@@ -15,7 +15,7 @@ All numeric caps, rate-limit numbers, the E.164 regex, header names, and poll ca
 **Decision: Supabase anonymous sign-in.** Every demo visitor gets a real Supabase session via `supabase.auth.signInAnonymously()`. All edge functions keep JWT verification on; the only unauthenticated function is `call-webhook` (HMAC auth, §4). This keeps a single auth code path, working RLS (anonymous users have a real `auth.uid()`), and per-identity rate limiting.
 
 Mechanics:
-- Enable in `supabase/config.toml`: `[auth] enable_anonymous_sign_ins = true`, and the same toggle in the hosted dashboard. Lower the Auth dashboard rate limit for anonymous sign-ins to `RATE_LIMITS.ANON_SIGNIN_PER_IP_HOUR` (§2.1; Supabase default is 30).
+- Enable in `supabase/config.toml`: `[auth] enable_anonymous_sign_ins = true`, and the same toggle in the hosted dashboard. Lower the Auth dashboard rate limit for anonymous sign-ins to 10/hour/IP (§2.1; Supabase default is 30). This is a dashboard setting, not a `RATE_LIMITS.*` constant — `api-types.ts` does not define one for it.
 - The anonymous session is created **lazily**: only when the visitor clicks "Try the demo" and reaches `/brainstorm` — never on landing-page load (crawlers must not mint users).
 - Anonymous JWTs carry `is_anonymous: true` both as a top-level claim and on the `auth.getUser()` user object. Both edge functions and RLS policies branch on it (RLS via `coalesce((auth.jwt()->>'is_anonymous')::boolean, false)`).
 - Upgrade path: the `use-session` hook exposes `linkEmail(email, password)` and `linkGoogle()` (R16), which **preserve the uid** — demo scripts/calls carry over. No data migration code needed.
@@ -51,7 +51,7 @@ Per R2, `gemini-conversation` is **stateless — it never reads or writes produc
 | `script_edit_events` | own | own, **denied if anon** | none | none | anon: denied (no learning signal from drive-bys) |
 | `call_logs` | own | **none** | **none** | none | same; rows written only by service role (make-call / call-webhook, R5) |
 | `scheduled_calls` | own | **none** | **none** | **none** | same; SELECT-only — no client write policies or grants until P6 (R10) |
-| `script_feedback` | own | own, denied if anon | none | own | P5 feature; policies shipped now per frozen schema |
+| `script_feedback` | own | own, **denied if anon** | own, **denied if anon** (cols `rating`, `note`) | own | feedback feature; INSERT/UPDATE/DELETE policies + grants shipped now per frozen schema (upsert-to-toggle 👍/👎) |
 | `anonymous_events` | **none** | **none** | none | none | RLS on, zero policies; service-role-only writes |
 
 Column restriction on `profiles` (R9): revoke blanket UPDATE and grant column-level —
@@ -91,37 +91,37 @@ Plus one infrastructure table (§5): `private.rate_limits` — lives in the non-
 
 **Rule: zod at every edge-function boundary; client-side validation (react-hook-form + `@hookform/resolvers/zod`) is UX only and is never trusted.** The authoritative schemas live in `supabase/functions/_shared/schemas.ts` (Deno). The client mirror `src/lib/schemas.ts` exists and is **orchestrator-owned (R3, R20)**; it imports the shared constants (`E164_REGEX`, `LIMITS`) from `src/types/api` so numbers structurally cannot drift. Edge functions import zod pinned: `import { z } from "npm:zod@3.25.76"`.
 
-All validation failures return the standard error envelope defined in api.md — 12 codes including `not_implemented`, each with a `retryable` flag — and never echo the offending value (no reflected-input logging). Codes used in this document: `unauthorized`, `validation_error`, `rate_limited`, `quota_exceeded`, `upstream_error`, `not_implemented`.
+All validation failures return the standard error envelope defined in api.md — the 12-entry `API_ERROR_CODES` array (the "11+1" framing of R3, `not_implemented` being the +1), each with a `retryable` flag — and never echo the offending value (no reflected-input logging). Codes used in this document, by their exact `api-types.ts` identifiers: `invalid_request` (the malformed-body/failed-validation 400), `unauthorized`, `rate_limited`, `quota_exceeded`, `upstream_error`, `not_implemented`.
 
 ### 2.1 Canonical numbers — single reference copy
 
 The constants below live in `api-types.ts`; this table is the one place this document shows the values. Everywhere else, constant names only.
 
-| Constant | Value |
+| Constant (exact `api-types.ts` identifier) | Value |
 |---|---|
 | `LIMITS.AUDIO_MAX_BYTES` | 5,242,880 (5 MB) |
 | `LIMITS.AUDIO_MAX_SECONDS` | 60 |
-| `LIMITS.TTS_MAX_CHARS` | 800 |
+| `LIMITS.TTS_TEXT_MAX_CHARS` | 800 |
 | `LIMITS.CONVERSATION_MAX_TOTAL_CHARS` | 30,000 |
-| `LIMITS.CONVERSATION_MAX_MESSAGES` | 40 |
+| `LIMITS.MESSAGES_MAX` | 40 |
 | `LIMITS.MESSAGE_MAX_CHARS` | 4,000 |
-| `LIMITS.WEBHOOK_MAX_BODY_BYTES` | 1,048,576 (1 MB) |
-| `LIMITS.TRANSCRIPT_MAX_STORED_CHARS` | 100,000 |
+| `LIMITS.WEBHOOK_BODY_MAX_BYTES` | 1,048,576 (1 MB) |
+| `LIMITS.TRANSCRIPT_STORED_MAX_CHARS` | 100,000 |
 | `E164_REGEX` | `^\+[1-9]\d{1,14}$` |
-| `POLL_INTERVAL_MS` / `POLL_TIMEOUT_MS` | 5,000 / 120,000 |
+| `LIMITS.POLL_INTERVAL_MS` / `LIMITS.POLL_TIMEOUT_MS` | 5,000 / 120,000 |
 | `WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS` | 300 |
-| `RATE_LIMITS.MAKE_CALL_PER_IP_HOUR` | 5 |
-| `RATE_LIMITS.MAKE_CALL_PER_ANON_UID_DAY` | 10 |
-| `RATE_LIMITS.MAKE_CALL_PER_AUTHED_UID_DAY` | 20 |
-| `RATE_LIMITS.WHISPER_PER_UID_HOUR` | 30 |
-| `RATE_LIMITS.WHISPER_PER_IP_HOUR` | 60 |
-| `RATE_LIMITS.GEMINI_PER_UID_HOUR` | 60 |
-| `RATE_LIMITS.GEMINI_PER_IP_HOUR` | 120 |
-| `RATE_LIMITS.TTS_REQUESTS_PER_UID_HOUR` | 20 |
-| `RATE_LIMITS.TTS_REQUESTS_PER_IP_HOUR` | 60 |
-| `RATE_LIMITS.TTS_CHARS_PER_UID_DAY` | 1,500 |
-| `RATE_LIMITS.TTS_CHARS_GLOBAL_MONTH` | 9,000 |
-| `RATE_LIMITS.ANON_SIGNIN_PER_IP_HOUR` (Auth dashboard setting) | 10 |
+| `RATE_LIMITS.makeCallPerIp` | `{ limit: 5, window: "hour" }` |
+| `RATE_LIMITS.makeCallPerAnonUser` | `{ limit: 10, window: "day" }` |
+| `RATE_LIMITS.makeCallPerUser` | `{ limit: 20, window: "day" }` |
+| `RATE_LIMITS.transcribePerUser` | `{ limit: 30, window: "hour" }` |
+| `RATE_LIMITS.transcribePerIp` | `{ limit: 60, window: "hour" }` |
+| `RATE_LIMITS.conversationPerUser` | `{ limit: 60, window: "hour" }` |
+| `RATE_LIMITS.conversationPerIp` | `{ limit: 120, window: "hour" }` |
+| `RATE_LIMITS.ttsRequestsPerUser` | `{ limit: 20, window: "hour" }` |
+| `RATE_LIMITS.ttsRequestsPerIp` | `{ limit: 60, window: "hour" }` |
+| `RATE_LIMITS.ttsCharsPerUser` | `{ limit: 1,500, window: "day" }` |
+| `RATE_LIMITS.ttsCharsGlobal` | `{ limit: 9,000, window: "month" }` |
+| anonymous sign-ins (Supabase Auth dashboard setting; no `api-types.ts` constant) | 10 / hour / IP |
 | Anonymous retention / rate_limits cleanup (migration, R15) | 24 h / 2 days |
 
 ### 2.2 Per-function contracts
@@ -131,10 +131,10 @@ The constants below live in `api-types.ts`; this table is the one place this doc
   - Client records at most `LIMITS.AUDIO_MAX_SECONDS` per utterance (MediaRecorder timer) — the byte cap is the authoritative server backstop (60 s of 128 kbps Opus ≈ 1 MB, so the cap is generous).
   - MIME allowlist: `audio/webm`, `audio/ogg`, `audio/mp4`, `audio/mpeg`, `audio/wav`. Anything else: 415.
   - Audio is held in memory, forwarded to Groq, and discarded. **Never written to disk or Storage** (§6).
-- **`gemini-conversation`** — JSON body: `{ session_id?: uuid, messages: Array<{ role: 'user'|'assistant', text: string(1..LIMITS.MESSAGE_MAX_CHARS) }>(max LIMITS.CONVERSATION_MAX_MESSAGES) }`; additional invariant: total text across messages ≤ `LIMITS.CONVERSATION_MAX_TOTAL_CHARS`. Unknown keys stripped (`.strip()`). Violations → 400 `validation_error`. The function performs no DB reads or writes (R2).
-- **`elevenlabs-tts`** — `{ text: string(1..LIMITS.TTS_MAX_CHARS) }`. The cap ≈ 50 seconds of speech; anything longer is a quota attack.
+- **`gemini-conversation`** — JSON body: `{ session_id?: uuid, messages: Array<{ role: 'user'|'assistant', text: string(1..LIMITS.MESSAGE_MAX_CHARS) }>(max LIMITS.MESSAGES_MAX) }`; additional invariant: total text across messages ≤ `LIMITS.CONVERSATION_MAX_TOTAL_CHARS`. Unknown keys stripped (`.strip()`). Violations → 400 `invalid_request`. The function performs no DB reads or writes (R2).
+- **`elevenlabs-tts`** — `{ text: string(1..LIMITS.TTS_TEXT_MAX_CHARS) }`. The cap ≈ 50 seconds of speech; anything longer is a quota attack.
 - **`make-call`** — `{ script_id: uuid, phone_number: string }` with `E164_REGEX` validation after stripping spaces/dashes/parens server-side. There is **no client-supplied `mode` field**; `resolveCallMode()` decides server-side and its `"real"` arm returns `501 not_implemented` (R12). Script ownership is checked by fetching the script with the caller-scoped client (RLS enforces ownership) — never with service role (R5).
-- **`call-webhook`** — validation per api.md (R4, R17): a rich Bland-compatible zod shape with `.passthrough()` (unknown keys tolerated, never trusted), body capped at `LIMITS.WEBHOOK_MAX_BODY_BYTES`. The raw provider `status` string is normalized through `BLAND_STATUS_MAP` (api.md) into our status enum; unmapped statuses are rejected. `transcript` is truncated server-side at `LIMITS.TRANSCRIPT_MAX_STORED_CHARS`. A `metadata` correlation block carries `call_log_id`, which is **cross-checked** against the row matched by `bland_call_id`. Any identity field in the payload (`user_id` or otherwise) is **ignored** — the affected user is resolved exclusively from the matched `call_logs` row (§4.2).
+- **`call-webhook`** — validation per api.md (R4, R17): a rich Bland-compatible zod shape with `.passthrough()` (unknown keys tolerated, never trusted), body capped at `LIMITS.WEBHOOK_BODY_MAX_BYTES`. The raw provider `status` string is normalized through `BLAND_STATUS_MAP` (api.md) into our status enum; an unmapped raw status is resolved by `BLAND_STATUS_MAP`'s documented fallback (`completed` if `payload.completed === true`, else `failed`). `transcript` is truncated server-side at `LIMITS.TRANSCRIPT_STORED_MAX_CHARS`. A `metadata` correlation block carries `call_log_id`, which is **cross-checked** against the row matched by `bland_call_id`. Any identity field in the payload (`user_id` or otherwise) is **ignored** — the affected user is resolved exclusively from the matched `call_logs` row (§4.2).
 
 ---
 
@@ -194,7 +194,7 @@ CI (lint + typecheck + unit tests + SSG build) runs with **no real secrets**: `V
 
 ### 4.2 Replay and idempotency protection
 
-- The handler updates only: `UPDATE call_logs SET ... WHERE bland_call_id = $1 AND status IN ('initiated','ringing')`. A terminal-status row is never re-processed — replaying a completed payload is a no-op (0 rows), and the function returns 200 without side effects (no duplicate email/extraction).
+- Idempotency follows api.md §3.6 exactly: resolve the row (by `metadata.call_log_id`, falling back to `bland_call_id`); if its status is already terminal, return `200 {processed:false, reason:"already_processed"}` and do nothing; otherwise `UPDATE call_logs SET ... WHERE id = <resolved row id> AND bland_call_id = <payload.call_id>`. Replaying a terminal-status payload is therefore a no-op with no side effects (no duplicate email/extraction).
 - The user is resolved **from the matched `call_logs` row**, never from the payload; `metadata.call_log_id` must cross-check against that row (R4). A forged payload with someone else's identity fields cannot redirect notifications.
 - The ±300 s timestamp window rejects replays of captured requests outright.
 
@@ -219,7 +219,7 @@ This is the path most likely to become an auth bypass if done lazily, so it is f
 create schema if not exists private;
 
 create table private.rate_limits (
-  bucket text not null,          -- e.g. 'make_call_ip', 'tts_chars_global'
+  bucket text not null,          -- exact strings frozen as RATE_LIMITS.<key>.bucket, e.g. 'make_call:ip', 'tts_chars:global'
   key text not null,             -- ip, user_id, or 'global'
   window_start timestamptz not null,
   count integer not null default 0,
@@ -230,12 +230,12 @@ create table private.rate_limits (
 The `private` schema is never added to PostgREST's exposed schemas, so the table is unreachable through the API surface entirely. The **only** access path is a SECURITY DEFINER RPC:
 
 ```sql
--- public.rate_limit_hit(bucket text, key text, window text, amount int default 1)
---   window ∈ ('hour','day','month') via date_trunc; returns the new count.
+-- public.rate_limit_hit(p_bucket text, p_key text, p_window text, p_amount integer default 1)
+--   p_window ∈ ('hour','day','month') via date_trunc; returns the new count.
 --   Atomic: INSERT ... ON CONFLICT (bucket,key,window_start)
---           DO UPDATE SET count = rate_limits.count + amount RETURNING count;
-revoke execute on function public.rate_limit_hit from public, anon, authenticated;
-grant  execute on function public.rate_limit_hit to service_role;
+--           DO UPDATE SET count = rate_limits.count + greatest(p_amount, 0) RETURNING count;
+revoke execute on function public.rate_limit_hit(text, text, text, integer) from public, anon, authenticated;
+grant  execute on function public.rate_limit_hit(text, text, text, integer) to service_role;
 ```
 
 Edge functions call it through the shared helper `supabase/functions/_shared/rate-limit.ts` (service-role client) and compare the returned count to the `RATE_LIMITS.*` constant; over limit → **429 `rate_limited` with `Retry-After`**. The full DDL lives in the migration / db.md (R1 — the migration IS the contract). Daily pg_cron cleanup of rows older than 2 days ships **in the initial migration**, extension-guarded (R15).
@@ -246,24 +246,26 @@ The previous `anonymous_events`-row-counting + `ip_hash` + `RATE_LIMIT_SALT` des
 
 ### 5.2 Buckets (numbers: §2.1; canonical copy in api-types.ts)
 
-| Bucket | Key | Window | Constant |
+Bucket strings are the canonical `RATE_LIMITS.<key>.bucket` values frozen in `api-types.ts`; api.md §8 is the single permitted reference table and this mirrors it verbatim.
+
+| Bucket (`RATE_LIMITS.….bucket`) | Key | Window | Constant |
 |---|---|---|---|
-| `make_call_ip` | IP | hour | `RATE_LIMITS.MAKE_CALL_PER_IP_HOUR` |
-| `make_call_uid` (anon) | uid | day | `RATE_LIMITS.MAKE_CALL_PER_ANON_UID_DAY` |
-| `make_call_uid` (authed) | uid | day | `RATE_LIMITS.MAKE_CALL_PER_AUTHED_UID_DAY` |
-| `whisper_uid` | uid | hour | `RATE_LIMITS.WHISPER_PER_UID_HOUR` |
-| `whisper_ip` | IP | hour | `RATE_LIMITS.WHISPER_PER_IP_HOUR` |
-| `gemini_uid` | uid | hour | `RATE_LIMITS.GEMINI_PER_UID_HOUR` |
-| `gemini_ip` | IP | hour | `RATE_LIMITS.GEMINI_PER_IP_HOUR` |
-| `tts_requests_uid` | uid | hour | `RATE_LIMITS.TTS_REQUESTS_PER_UID_HOUR` |
-| `tts_requests_ip` | IP | hour | `RATE_LIMITS.TTS_REQUESTS_PER_IP_HOUR` |
-| `tts_chars_uid` | uid | day | `RATE_LIMITS.TTS_CHARS_PER_UID_DAY` |
-| `tts_chars_global` | `'global'` | month | `RATE_LIMITS.TTS_CHARS_GLOBAL_MONTH` |
-| anonymous sign-ins (Supabase Auth dashboard setting, not this table) | IP | hour | `RATE_LIMITS.ANON_SIGNIN_PER_IP_HOUR` |
+| `make_call:ip` | IP | hour | `RATE_LIMITS.makeCallPerIp` |
+| `make_call:uid_anon` | anon uid | day | `RATE_LIMITS.makeCallPerAnonUser` |
+| `make_call:uid` | authed uid | day | `RATE_LIMITS.makeCallPerUser` |
+| `whisper:uid` | uid | hour | `RATE_LIMITS.transcribePerUser` |
+| `whisper:ip` | IP | hour | `RATE_LIMITS.transcribePerIp` |
+| `gemini:uid` | uid | hour | `RATE_LIMITS.conversationPerUser` |
+| `gemini:ip` | IP | hour | `RATE_LIMITS.conversationPerIp` |
+| `tts:uid` | uid | hour | `RATE_LIMITS.ttsRequestsPerUser` |
+| `tts:ip` | IP | hour | `RATE_LIMITS.ttsRequestsPerIp` |
+| `tts_chars:uid` | uid | day | `RATE_LIMITS.ttsCharsPerUser` |
+| `tts_chars:global` | `'global'` | month | `RATE_LIMITS.ttsCharsGlobal` |
+| anonymous sign-ins (Supabase Auth dashboard setting, not this table) | IP | hour | dashboard setting; no `api-types.ts` constant |
 
 ### 5.3 ElevenLabs quota protection (R7)
 
-The free tier is ~10K chars/month; the global monthly counter hard-stops below it (`RATE_LIMITS.TTS_CHARS_GLOBAL_MONTH`). Failure signaling uses the standard envelope — **never a 200-with-fallback payload**:
+The free tier is ~10K chars/month; the global monthly counter hard-stops below it (`RATE_LIMITS.ttsCharsGlobal`). Failure signaling uses the standard envelope — **never a 200-with-fallback payload**:
 
 - Global or per-uid char quota exhausted, or upstream quota error from ElevenLabs → **`503 quota_exceeded`**.
 - Any other upstream failure (5xx, timeout, malformed response) → **`502 upstream_error`**.
@@ -354,13 +356,13 @@ Each item is testable; workers must demonstrate it (Deno test, Vitest, CI grep, 
 1. `select relname from pg_class join pg_namespace on relnamespace=pg_namespace.oid where nspname='public' and relkind='r' and not relrowsecurity` returns **zero rows** (RLS on all 9 product tables). The `private` schema is absent from PostgREST's exposed schemas; `has_function_privilege` asserts `public.rate_limit_hit` execute is granted to `service_role` and revoked from `public`/`anon`/`authenticated`.
 2. Policy matrix of §1.4 exists verbatim (assert via `pg_policies`); `anonymous_events` has zero policies; `call_logs` has no client INSERT/UPDATE/DELETE policy; `scheduled_calls` has SELECT-only (no write policies or grants, R10).
 3. `GRANT UPDATE` on `profiles` covers exactly `(display_name, phone_number, time_zone, communication_style)` (R9). Tests: an authenticated-role update of `phone_verified_at` **fails**; an update of `phone_number` **succeeds** and the `reset_phone_verification` trigger nulls `phone_verified_at`.
-4. Anon-denial works: a JWT with `is_anonymous=true` cannot INSERT into `user_facts`/`script_edit_events`/`script_feedback` nor UPDATE `user_facts` (policy tests with `set request.jwt.claims`); the same JWT CAN insert/update/delete its own `brainstorm_sessions` and `call_scripts` rows (R2/R8).
+4. Anon-denial works: a JWT with `is_anonymous=true` cannot INSERT into `user_facts`/`script_edit_events`/`script_feedback` nor UPDATE `user_facts`/`script_feedback` (policy tests with `set request.jwt.claims`); the same JWT CAN insert/update/delete its own `brainstorm_sessions` and `call_scripts` rows (R2/R8).
 5. Deleting an anonymous `auth.users` row cascades to zero orphans across all 9 product tables; the 24 h anon purge job (extension-guarded) and the 2-day `rate_limits` cleanup job exist **in the initial migration** (R15).
 
 **ws/edge** (owns `supabase/functions/**` except `api-types.ts`)
 1. Every function except `call-webhook` returns 401 for: no Authorization header, garbage JWT, **and the bare anon key** (the §1.3 gotcha) — tests for all three, per function.
-2. `call-webhook`: 401 on missing/invalid `x-calldone-signature` and on `x-calldone-timestamp` outside ±`WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS`; a valid HMAC over `"<timestamp>.<rawBody>"` is accepted; a replayed terminal-status payload is a 200 no-op (no second notification, no row change); the compare is timing-safe (`@std/crypto` `timingSafeEqual` — code-review checkable). A payload whose `metadata.call_log_id` mismatches the `bland_call_id` row is rejected.
-3. zod rejection tests: audio over `LIMITS.AUDIO_MAX_BYTES` → 413; TTS text over `LIMITS.TTS_MAX_CHARS` → 400; non-`E164_REGEX` phone → 400; conversation over `LIMITS.CONVERSATION_MAX_MESSAGES` or `LIMITS.CONVERSATION_MAX_TOTAL_CHARS` → 400. All errors use the api.md envelope (12 codes, `retryable` flag); no reflected input.
+2. `call-webhook`: 401 on missing/invalid `x-calldone-signature` and on `x-calldone-timestamp` outside ±`WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS`; a valid HMAC over `"<timestamp>.<rawBody>"` is accepted; a replayed terminal-status payload is a 200 no-op (no second notification, no row change); the compare is timing-safe (`@std/crypto` `timingSafeEqual` — code-review checkable). A payload whose `metadata.call_log_id` mismatches the `bland_call_id` row is **not processed** — the function returns `200 {received:true, processed:false, reason:"metadata_mismatch"}` and logs it (never a 4xx, to avoid provider retry storms; api.md §3.6 step 2 / R4).
+3. zod rejection tests: audio over `LIMITS.AUDIO_MAX_BYTES` → 413; TTS text over `LIMITS.TTS_TEXT_MAX_CHARS` → 400; non-`E164_REGEX` phone → 400; conversation over `LIMITS.MESSAGES_MAX` or `LIMITS.CONVERSATION_MAX_TOTAL_CHARS` → 400. All errors use the api.md envelope (the 12-entry `API_ERROR_CODES` array, `retryable` flag); the 400 code is `invalid_request`; no reflected input.
 4. Rate limits return 429 with `Retry-After` via `rate_limit_hit`; the make-call IP bucket and the global TTS char counter have explicit tests. **TTS quota exhaustion returns `503 quota_exceeded`; other upstream failures `502 upstream_error`; never a 200-with-fallback** (client-side fallback covered by brainstorm-ui tests, R7).
 5. `grep -r "BLAND_API_KEY" supabase/functions/` returns nothing; `resolveCallMode()`'s `"real"` arm returns `501 not_implemented` (test, R12); `gemini-conversation` touches no product tables (no `.from(` calls in its module — grep/review, R2); no `console.log` of request bodies, transcripts, or headers; all imports version-pinned; CORS reflects only `ALLOWED_ORIGINS` entries (test with a hostile Origin header).
 6. Disclosure-line enforcement unit test: model output missing the lines → returned script content contains them anyway.

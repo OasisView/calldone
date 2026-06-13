@@ -264,8 +264,8 @@ export function useToggleFavorite(): UseMutationResult<CallScript, ApiError,
 export function useCallLogs(): UseQueryResult<CallLog[], ApiError>
 export function useCallLog(callLogId: string, opts?: { poll?: boolean }):
   UseQueryResult<CallLog | null, ApiError>
-// poll: refetchInterval = POLL_INTERVAL_MS while status ∈ {"initiated","ringing"};
-// stops on terminal status. If still non-terminal after POLL_TIMEOUT_MS, stop
+// poll: refetchInterval = LIMITS.POLL_INTERVAL_MS while status ∈ {"initiated","ringing"};
+// stops on terminal status. If still non-terminal after LIMITS.POLL_TIMEOUT_MS, stop
 // polling and surface a retryable error state ("the demo call didn't complete").
 // Both constants from api-types (R17).
 
@@ -336,10 +336,10 @@ All numeric caps, rate-limit numbers, the E.164 regex, header names, and poll ca
 | `LIMITS.AUDIO_MAX_SECONDS` | 60 | recorder hard-stop |
 | `LIMITS.TTS_TEXT_MAX_CHARS` | 800 | `use-speech-playback` chunk guard |
 | `LIMITS.CONVERSATION_MAX_TOTAL_CHARS` | 30,000 | `use-brainstorm` |
-| `LIMITS.CONVERSATION_MAX_MESSAGES` | 40 | `use-brainstorm` |
+| `LIMITS.MESSAGES_MAX` | 40 | `use-brainstorm` |
 | `LIMITS.MESSAGE_MAX_CHARS` | 4,000 | `use-brainstorm` / `schemas.ts` |
-| `POLL_INTERVAL_MS` | 5,000 | `useCallLog` |
-| `POLL_TIMEOUT_MS` | 120,000 | `useCallLog` |
+| `LIMITS.POLL_INTERVAL_MS` | 5,000 | `useCallLog` |
+| `LIMITS.POLL_TIMEOUT_MS` | 120,000 | `useCallLog` |
 | `E164_REGEX` | `^\+[1-9]\d{1,14}$` | `lib/phone.ts`, `schemas.ts` |
 | `RATE_LIMITS` | see api.md §8 | 429 messaging only |
 
