@@ -341,7 +341,7 @@ comment on table public.anonymous_events is
 create schema if not exists private;
 
 create table private.rate_limits (
-  bucket       text not null,        -- e.g. 'make-call:ip', 'tts-chars:global'
+  bucket       text not null,        -- canonical RATE_LIMITS.<key>.bucket strings, e.g. 'make_call:ip', 'tts_chars:global'
   key          text not null,        -- ip, user_id, or 'global'
   window_start timestamptz not null, -- date_trunc('hour'|'day'|'month', now())
   count        integer not null default 0,
