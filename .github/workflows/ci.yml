@@ -113,7 +113,9 @@ jobs:
           # tests exist; pass with a notice when they don't. Auto-activates once ws/edge
           # lands its *_test.ts files — no CI change needed at that point.
           if find supabase/functions -type f \( -name '*_test.ts' -o -name '*.test.ts' -o -name 'test.ts' \) 2>/dev/null | grep -q .; then
-            deno test --allow-env supabase/functions
+            # Run from inside the functions dir so Deno discovers its deno.json
+            # import map (Deno 2 resolves config from CWD, not per-file).
+            (cd supabase/functions && deno test --allow-env .)
           else
             echo "No edge-function tests present yet (ws/edge not merged) — skipping deno test."
           fi
