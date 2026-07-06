@@ -14,5 +14,7 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: ["./tests/setup.ts"],
     css: false,
+    // Deno-runtime edge-function tests run via `npm run test:edge`, not vitest.
+    exclude: ["**/node_modules/**", "supabase/functions/**"],
   },
 })

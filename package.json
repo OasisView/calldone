@@ -11,7 +11,7 @@
     "typecheck": "tsc -b --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:edge": "deno test --allow-env supabase/functions"
+    "test:edge": "cd supabase/functions && deno test --allow-env ."
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",
