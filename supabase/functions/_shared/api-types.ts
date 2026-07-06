@@ -1,30 +1,34 @@
 // ============================================================================
-// FROZEN API CONTRACT for Calldone edge functions (Phases 1-4 demo slice).
-// Single source of truth, imported by Deno edge functions
-// (../_shared/api-types.ts) AND the Vite app (via the src/types/api.ts
-// re-export shim). MUST stay dependency-free and side-effect-free: types,
-// const arrays/maps/objects, and regex literals only. No Deno globals, no
-// imports, no runtime logic beyond constant expressions.
+// FROZEN API CONTRACT — Calldone by Oasis (Checkpoint 3: inbound reception &
+// intake for nonprofits, R23–R28). Single source of truth, imported by Deno
+// edge functions AND the Vite app (via the src/types/api.ts re-export shim).
+// MUST stay dependency-free and side-effect-free: types, const arrays/maps/
+// objects, and regex literals only. No Deno globals, no imports, no runtime
+// logic beyond constant expressions.
 //
 // Owned by the orchestrator. Do not edit without a decision-register update
-// (docs/contracts/decision-register.md).
+// (docs/contracts/decision-register.md — Checkpoint 3 section).
+//
+// Layout: INBOUND CANON first; a fenced TRANSITIONAL COMPAT section at the
+// bottom keeps the retired consumer-slice symbols compiling until the worker
+// repurpose lands (then that whole section is deleted).
 // ============================================================================
 
 // ---------------------------------------------------------------- errors ---
 
 export const API_ERROR_CODES = [
   "invalid_request", //         400 — malformed body, failed validation
-  "unauthorized", //            401 — bad/missing JWT or webhook signature
-  "forbidden", //               403 — valid JWT but operation not allowed
+  "unauthorized", //            401 — bad/missing credentials or webhook auth
+  "forbidden", //               403 — authenticated but operation not allowed
   "not_found", //               404 — resource missing OR not owned (no existence leak)
   "method_not_allowed", //      405 — anything but POST (or OPTIONS preflight)
-  "payload_too_large", //       413 — body or audio exceeds limit
+  "payload_too_large", //       413 — body exceeds limit
   "unsupported_media_type", //  415 — wrong Content-Type
   "rate_limited", //            429 — see RATE_LIMITS
   "internal_error", //          500 — generic; details never leak internals
-  "not_implemented", //         501 — real-call mode in the demo slice (R12)
+  "not_implemented", //         501 — reserved (R12 pattern: unbuilt arms answer 501)
   "upstream_error", //          502 — provider failed after retries
-  "quota_exceeded", //          503 — upstream free-tier quota exhausted
+  "quota_exceeded", //          503 — upstream quota/cap exhausted
 ] as const;
 export type ApiErrorCode = (typeof API_ERROR_CODES)[number];
 
@@ -51,12 +55,6 @@ export const RETRYABLE_CODES: readonly ApiErrorCode[] = [
  *  CHECKs, server zod, and client validation alike. */
 export const E164_REGEX = /^\+[1-9]\d{1,14}$/;
 
-/** Webhook HMAC auth (R11): signature = hex(HMAC-SHA256(BLAND_WEBHOOK_SECRET,
- *  `${timestamp}.${rawBody}`)). Constant-time comparison required. */
-export const WEBHOOK_SIGNATURE_HEADER = "x-calldone-signature";
-export const WEBHOOK_TIMESTAMP_HEADER = "x-calldone-timestamp"; // unix seconds
-export const WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS = 300;
-
 export const RATE_LIMIT_HEADERS = {
   limit: "x-ratelimit-limit",
   remaining: "x-ratelimit-remaining",
@@ -64,23 +62,228 @@ export const RATE_LIMIT_HEADERS = {
   retryAfter: "retry-after", //  seconds, only on 429
 } as const;
 
-/** Canonical numeric caps (R17). Server zod enforces; client mirrors for UX. */
+// ------------------------------------------------- providers & CallEvent ---
+
+/** Managed inbound voice providers (R25). 'twilio' reserved for the
+ *  post-launch cost-optimization checkpoint. */
+export const CALL_PROVIDERS = ["vapi", "retell", "twilio"] as const;
+export type CallProvider = (typeof CALL_PROVIDERS)[number];
+
+/** Normalized internal event vocabulary (R25). Thin per-provider adapters map
+ *  raw webhook payloads into CallEvent; NO provider-specific type ever leaks
+ *  past the adapter boundary (supabase/functions/_shared/adapters/). */
+export const CALL_EVENT_TYPES = [
+  "call.started", //      provider answered an inbound call for one of our numbers
+  "call.ended", //        terminal; carries duration/transcript/end reason in data
+  "transcript.updated", // partial or final transcript segments
+  "transfer.initiated", // escalation to a human began (R26)
+  "voicemail.left", //    caller left a voicemail (R26 fallback)
+  "tool.invoked", //      provider-side record of an agent tool call
+] as const;
+export type CallEventType = (typeof CALL_EVENT_TYPES)[number];
+
+export interface CallEvent {
+  provider: CallProvider;
+  provider_call_id: string; //         provider's id for the call (≤200 chars)
+  provider_event_id: string | null; // idempotency key when the provider sends one
+  type: CallEventType;
+  org_phone_e164: string; //           the org number that was called (routing key)
+  caller_e164: string | null; //       null when caller id is withheld
+  occurred_at: string; //              ISO 8601
+  data: Record<string, unknown>; //    type-specific payload (normalized by adapter)
+}
+
+// ----------------------------------------------------- enums (DB mirror) ---
+// These const arrays are the SAME values as the DB CHECK constraints in
+// supabase/migrations/20260706000000_inbound_initial_schema.sql. If they ever
+// diverge, the migration wins — report, don't patch locally.
+
+export const ORG_ROLES = ["admin", "staff"] as const;
+export type OrgRole = (typeof ORG_ROLES)[number];
+
+/** R26 — how the AI answers the org's line. */
+export const ANSWERING_MODES = ["always", "after_hours", "overflow"] as const;
+export type AnsweringMode = (typeof ANSWERING_MODES)[number];
+
+export const INBOUND_CALL_STATUSES = [
+  "in_progress",
+  "completed",
+  "transferred",
+  "voicemail",
+  "failed",
+] as const;
+export type InboundCallStatus = (typeof INBOUND_CALL_STATUSES)[number];
+
+export const ESCALATION_OUTCOMES = ["none", "transferred", "voicemail"] as const;
+export type EscalationOutcome = (typeof ESCALATION_OUTCOMES)[number];
+
+/** R27 — v1 languages. 'es' appears only as the graceful-handoff path. */
+export const CALL_LANGUAGES = ["en", "es"] as const;
+export type CallLanguage = (typeof CALL_LANGUAGES)[number];
+
+export const INTAKE_STATUSES = ["new", "in_review", "done"] as const;
+export type IntakeStatus = (typeof INTAKE_STATUSES)[number];
+
+export const CALLBACK_STATUSES = [
+  "pending",
+  "approved",
+  "calling",
+  "done",
+  "canceled",
+] as const;
+export type CallbackStatus = (typeof CALLBACK_STATUSES)[number];
+
+export const PHONE_NUMBER_STATUSES = ["provisioning", "active", "released"] as const;
+export type PhoneNumberStatus = (typeof PHONE_NUMBER_STATUSES)[number];
+
+export const KNOWLEDGE_PACK_STATUSES = ["draft", "published"] as const;
+export type KnowledgePackStatus = (typeof KNOWLEDGE_PACK_STATUSES)[number];
+
+// ------------------------------------------------- disclosure & language ---
+// R23/R28: the warm disclosure is NEVER removed. It is baked into the system
+// prompt AND enforced in code post-generation (unit-tested): the first agent
+// utterance of every call must contain every DISCLOSURE_REQUIRED_SUBSTRINGS
+// member, and inbound_calls.disclosure_played records that it happened.
+
+/** `{org_name}` is replaced server-side; wording changes require a register update. */
+export const DISCLOSURE_GREETING_TEMPLATE_EN =
+  "Hi, thanks for calling {org_name}! I'm their virtual assistant — quick " +
+  "heads-up: I'm an AI, and this call may be recorded so I can take accurate " +
+  "notes for the team. How can I help you today?";
+
+/** Case-insensitive containment check for the enforcement test. */
+export const DISCLOSURE_REQUIRED_SUBSTRINGS = ["AI", "recorded"] as const;
+
+/** R27 — the one Spanish line: spoken when the agent detects a Spanish-first
+ *  caller, immediately before routing into the R26 escalation path. */
+export const SPANISH_HANDOFF_LINE_ES =
+  "Un momento, por favor — le comunico con una persona del equipo.";
+
+/** R26 — escalation triggers: the word "person" (en), or this DTMF digit. */
+export const ESCALATION_DTMF = "0";
+
+// ------------------------------------------------------------ agent tools ---
+// The brain executes these tools itself (Vapi custom-LLM mode): tool calls are
+// resolved inside agent-brain per turn; the provider only sees control actions
+// (transfer, end). Arg shapes are validated with zod in _shared/schemas.ts.
+
+export const AGENT_TOOLS = [
+  "capture_intake",
+  "book_appointment",
+  "request_transfer",
+  "take_voicemail",
+  "end_call",
+] as const;
+export type AgentTool = (typeof AGENT_TOOLS)[number];
+
+export interface CaptureIntakeArgs {
+  caller_name?: string | null; //   ≤ LIMITS.INTAKE_TEXT_MAX_CHARS
+  need: string; //                  1..LIMITS.INTAKE_NEED_MAX_CHARS
+  callback_number?: string | null; // E.164
+  callback_consent: boolean; //     explicit yes captured on the call (R23)
+  preferred_time?: string | null; // ≤ LIMITS.INTAKE_TEXT_MAX_CHARS
+}
+
+export interface BookAppointmentArgs {
+  title: string; //          1..200 chars
+  start_iso: string; //      ISO 8601 WITH offset
+  end_iso: string | null; // null => assume 30 min when building the .ics
+  location: string | null;
+}
+
+export interface RequestTransferArgs {
+  reason?: string | null; // ≤ 200 chars; logged, never spoken back
+}
+
+// ----------------------------------------------------------- auth headers ---
+
+/** agent-brain auth (server-to-server): Vapi custom-LLM requests carry this
+ *  header, compared constant-time against env BRAIN_SECRET. */
+export const BRAIN_SECRET_HEADER = "x-calldone-brain-secret";
+
+/** provider-webhook auth: each adapter verifies the provider's documented
+ *  mechanism (Vapi: configured server-secret header) against env
+ *  PROVIDER_WEBHOOK_SECRET. Unsigned/mis-signed requests => 401, no body echo. */
+export const PROVIDER_WEBHOOK_SECRET_ENV = "PROVIDER_WEBHOOK_SECRET";
+
+/** Function-secret env names (set via Supabase dashboard/CLI, never in git). */
+export const ENV_KEYS = [
+  "GEMINI_API_KEY",
+  "RESEND_API_KEY",
+  "PROVIDER_WEBHOOK_SECRET",
+  "BRAIN_SECRET",
+  "CALLS_ENABLED", //   R28 global kill switch: "true" | "false"
+  "ALLOWED_ORIGINS",
+] as const;
+
+// ---------------------------------------------------------------- limits ---
+
+/** Canonical numeric caps. Server zod enforces; client mirrors for UX.
+ *  Members below the `transitional` comment die with the worker repurpose. */
 export const LIMITS = {
-  AUDIO_MAX_BYTES: 5_242_880, //          5 MB upload cap (server-authoritative)
-  AUDIO_MAX_SECONDS: 60, //               client recorder hard-stop
+  CALL_MAX_MINUTES: 15, //             agent politely wraps up at this ceiling
+  TRANSCRIPT_MAX_TURNS: 200,
+  TRANSCRIPT_STORED_MAX_CHARS: 100_000,
+  KB_PACK_MAX_CHARS: 24_000, //        total published pack budget (prompt safety)
+  KB_ENTRIES_MAX: 100,
+  KB_ENTRY_QUESTION_MAX_CHARS: 500, // mirrors DB CHECK
+  KB_ENTRY_ANSWER_MAX_CHARS: 2_000, // mirrors DB CHECK
+  INTAKE_NEED_MAX_CHARS: 2_000, //     mirrors DB CHECK
+  INTAKE_TEXT_MAX_CHARS: 200, //       caller_name / preferred_time
+  SUMMARY_MAX_CHARS: 4_000, //         mirrors DB CHECK
+  ORG_NAME_MAX_CHARS: 200, //          mirrors DB CHECK
+  WEBHOOK_BODY_MAX_BYTES: 1_048_576, // 1 MB
+  BRAIN_BODY_MAX_BYTES: 262_144, //    256 KB per turn
+  ORG_MONTHLY_MINUTES_CAP_DEFAULT: 300, // mirrors DB default (R28)
+  RETENTION_DAYS_DEFAULT: 90, //       mirrors DB default (R23)
+  // ---- transitional (consumer slice; removed at worker repurpose) ----
+  AUDIO_MAX_BYTES: 5_242_880,
+  AUDIO_MAX_SECONDS: 60,
   TTS_TEXT_MAX_CHARS: 800,
   CONVERSATION_MAX_TOTAL_CHARS: 30_000,
   MESSAGE_MAX_CHARS: 4_000,
   MESSAGES_MAX: 40,
-  WEBHOOK_BODY_MAX_BYTES: 1_048_576, //   1 MB
-  TRANSCRIPT_STORED_MAX_CHARS: 100_000,
-  SCRIPT_TEXT_MIN_CHARS: 40,
-  SCRIPT_TEXT_MAX_CHARS: 4_000,
-  EXTRACTED_FACTS_MAX: 10,
-  POLL_INTERVAL_MS: 5_000, //             client polls call_logs at this cadence
-  POLL_TIMEOUT_MS: 120_000, //            then shows a retryable error state
-  DEMO_DEFAULT_DELAY_SECONDS: 30, //      default DEMO_SIMULATION_DELAY_SECONDS
+  POLL_INTERVAL_MS: 5_000,
+  POLL_TIMEOUT_MS: 120_000,
 } as const;
+
+/** Fixed-window rate limits (R6 pattern, R28), enforced via
+ *  public.rate_limit_hit(). `bucket` is the exact first argument to the RPC —
+ *  frozen here so edge code and docs cannot drift. */
+export const RATE_LIMITS = {
+  webhookEventsPerCall: { bucket: "webhook:call", limit: 240, window: "hour" },
+  brainTurnsPerCall: { bucket: "brain:call", limit: 80, window: "hour" },
+  callsPerOrg: { bucket: "calls:org", limit: 30, window: "day" },
+  kbPublishPerOrg: { bucket: "kb_publish:org", limit: 20, window: "day" },
+  summaryEmailsPerOrg: { bucket: "email:org", limit: 200, window: "day" },
+} as const;
+export type RateLimitWindow = "hour" | "day" | "month";
+
+// ------------------------------------------------------------ appointment ---
+
+/** Stored in intake_records.appointment (JSONB). null when no appointment.
+ *  The staff dashboard builds the .ics download client-side from this shape
+ *  via the shared _shared/ics.ts (R18 pattern). */
+export interface AppointmentDetails {
+  title: string;
+  start_iso: string; //      ISO 8601 WITH offset
+  end_iso: string | null; // null => assume 30 min when building the .ics
+  location: string | null;
+  notes: string | null;
+  confidence: number; //     0..1; UI flags < 0.6 as "unconfirmed"
+}
+
+// ============================================================================
+// ======================= TRANSITIONAL COMPAT SECTION ========================
+// Retired consumer-slice symbols kept ONLY so the not-yet-repurposed baseline
+// src/ keeps compiling (hooks/lib stubs import these). DELETE this entire
+// section in the worker-repurpose stage — nothing in the inbound product may
+// import from it. (decision-register.md Checkpoint 3.)
+// ============================================================================
+
+export const WEBHOOK_SIGNATURE_HEADER = "x-calldone-signature";
+export const WEBHOOK_TIMESTAMP_HEADER = "x-calldone-timestamp";
+export const WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS = 300;
 
 export const TRANSCRIBE_ALLOWED_MIME_TYPES = [
   "audio/webm",
@@ -90,26 +293,6 @@ export const TRANSCRIBE_ALLOWED_MIME_TYPES = [
   "audio/wav",
 ] as const;
 
-/** Fixed-window rate limits (R6), enforced via public.rate_limit_hit().
- *  window: 'hour' | 'day' | 'month' (date_trunc fixed windows). */
-export const RATE_LIMITS = {
-  // `bucket` is the exact first argument to public.rate_limit_hit() — frozen
-  // here so edge code and contract docs cannot drift to different strings.
-  makeCallPerIp: { bucket: "make_call:ip", limit: 5, window: "hour" }, //         spec §Demo Safety
-  makeCallPerAnonUser: { bucket: "make_call:uid_anon", limit: 10, window: "day" },
-  makeCallPerUser: { bucket: "make_call:uid", limit: 20, window: "day" }, //      spec's daily cap
-  transcribePerUser: { bucket: "whisper:uid", limit: 30, window: "hour" },
-  transcribePerIp: { bucket: "whisper:ip", limit: 60, window: "hour" },
-  conversationPerUser: { bucket: "gemini:uid", limit: 60, window: "hour" },
-  conversationPerIp: { bucket: "gemini:ip", limit: 120, window: "hour" },
-  ttsRequestsPerUser: { bucket: "tts:uid", limit: 20, window: "hour" },
-  ttsRequestsPerIp: { bucket: "tts:ip", limit: 60, window: "hour" },
-  ttsCharsPerUser: { bucket: "tts_chars:uid", limit: 1_500, window: "day" },
-  ttsCharsGlobal: { bucket: "tts_chars:global", limit: 9_000, window: "month" }, // ElevenLabs free-tier guard
-} as const;
-export type RateLimitWindow = "hour" | "day" | "month";
-
-/** call_logs.status enum — mirrors the frozen DB schema. */
 export const CALL_STATUSES = [
   "initiated",
   "ringing",
@@ -127,157 +310,106 @@ export const TERMINAL_CALL_STATUSES: readonly CallStatus[] = [
   "busy",
 ] as const;
 
-/**
- * Normalization of Bland's raw `status` strings to our CallStatus.
- * Unknown raw status: "completed" if payload.completed === true, else "failed".
- */
-export const BLAND_STATUS_MAP: Record<string, CallStatus> = {
-  completed: "completed",
-  complete: "completed",
-  "no-answer": "no_answer",
-  no_answer: "no_answer",
-  busy: "busy",
-  failed: "failed",
-  error: "failed",
-};
-
 export type CallMode = "demo" | "real";
-
-/** Fixed fictional caller id used in simulated demo payloads (undialable). */
 export const DEMO_CALLER_ID = "+15555550100";
 export const DEMO_CALL_ID_PREFIX = "demo_";
 
-// --------------------------------------------------- whisper-transcribe ---
-// POST multipart/form-data. Form field names:
-export const TRANSCRIBE_AUDIO_FIELD = "audio"; //       File/Blob, TRANSCRIBE_ALLOWED_MIME_TYPES, <= LIMITS.AUDIO_MAX_BYTES
-export const TRANSCRIBE_LANGUAGE_FIELD = "language"; // optional ISO-639-1, e.g. "en"
+export const TRANSCRIBE_AUDIO_FIELD = "audio";
+export const TRANSCRIBE_LANGUAGE_FIELD = "language";
 
 export interface TranscribeResponse {
-  text: string; //                    "" if no speech detected
-  duration_seconds: number | null; // null if provider omits it
+  text: string;
+  duration_seconds: number | null;
 }
 
-// -------------------------------------------------- gemini-conversation ---
-
 export interface ConversationMessage {
-  role: "user" | "assistant"; // server maps assistant -> Gemini "model"
-  text: string; //               1..LIMITS.MESSAGE_MAX_CHARS, plain text
+  role: "user" | "assistant";
+  text: string;
 }
 
 export interface GeminiConversationRequest {
-  /** Full history, oldest first. 1..LIMITS.MESSAGES_MAX items. Last item MUST
-   *  be role "user". The system prompt is built SERVER-SIDE only (disclosures,
-   *  user facts); clients can never inject or override it. */
   messages: ConversationMessage[];
-  /** Client-generated brainstorm_sessions.id (uuid), for logging only.
-   *  The function is stateless (R2) — it never writes the DB. */
   session_id?: string | null;
 }
 
 export interface ExtractedFact {
-  key: string; //        snake_case, /^[a-z][a-z0-9_]{1,63}$/
-  value: string; //      1..500 chars
-  confidence: number; // 0..1
+  key: string;
+  value: string;
+  confidence: number;
 }
 
 export interface FinalizedScript {
-  /** Complete call script. ALWAYS includes the two mandatory disclosures
-   *  ("AI assistant calling on behalf of <name>", "this call may be
-   *  recorded") — enforced post-generation in code, not by model compliance. */
-  script_text: string; //              LIMITS.SCRIPT_TEXT_MIN/MAX_CHARS
-  call_purpose: string; //             3..200 chars
-  target_phone_hint: string | null; // E.164 or null if the user never said a number
-  extracted_facts: ExtractedFact[]; // 0..LIMITS.EXTRACTED_FACTS_MAX items
+  script_text: string;
+  call_purpose: string;
+  target_phone_hint: string | null;
+  extracted_facts: ExtractedFact[];
 }
 
 export interface GeminiReplyResponse {
   type: "reply";
-  message: string; //          agent's next utterance (plain text, TTS-ready)
-  session_id: string | null; // echoed
+  message: string;
+  session_id: string | null;
 }
 
 export interface GeminiScriptFinalizedResponse {
   type: "script_finalized";
   script: FinalizedScript;
-  /** Short spoken confirmation for TTS, e.g. "Done — I've drafted your script." */
   closing_message: string;
-  session_id: string | null; // echoed
+  session_id: string | null;
 }
 
 export type GeminiConversationResponse =
   | GeminiReplyResponse
   | GeminiScriptFinalizedResponse;
 
-// ------------------------------------------------------- elevenlabs-tts ---
-
-export const TTS_VOICES = ["default"] as const; // server maps to real ElevenLabs voice ids
+export const TTS_VOICES = ["default"] as const;
 export type TtsVoice = (typeof TTS_VOICES)[number];
 
 export interface TtsRequest {
-  text: string; //     1..LIMITS.TTS_TEXT_MAX_CHARS
-  voice?: TtsVoice; // defaults to "default"
+  text: string;
+  voice?: TtsVoice;
 }
-// TTS success response is raw `audio/mpeg` bytes (HTTP 200), NOT JSON.
-// 503 quota_exceeded / 502 upstream_error => client falls back to browser
-// SpeechSynthesis (synthesizeSpeech() returns null) and shows the notice.
-
-// ------------------------------------------------------------ make-call ---
 
 export interface MakeCallRequest {
-  script_id: string; //    uuid of a call_scripts row owned by the caller (RLS-enforced)
-  phone_number: string; // E.164
-  // Deliberately NO client-supplied demo/real flag. The server decides (R12).
+  script_id: string;
+  phone_number: string;
 }
 
 export interface MakeCallResponse {
-  call_log_id: string; // uuid of the call_logs row created by this function
-  call_id: string; //     "demo_<uuid>" in demo mode; Bland call_id in real mode (P6)
-  mode: CallMode; //      what the server actually decided
+  call_log_id: string;
+  call_id: string;
+  mode: CallMode;
   status: "initiated";
-  /** Seconds until the simulated webhook fires (demo); null for real calls. */
   estimated_completion_seconds: number | null;
 }
 
-// -------------------------------------------------------- schedule-call ---
-// P6 ONLY — types frozen now; the function is NOT built or deployed in the
-// demo slice and scheduled_calls has SELECT-only client access (R10).
-
 export interface ScheduleCallRequest {
-  script_id: string; //     uuid owned by caller
-  phone_number: string; //  E.164
-  scheduled_for: string; // ISO 8601; must be > now+5min and < now+30days
+  script_id: string;
+  phone_number: string;
+  scheduled_for: string;
 }
 
 export interface ScheduleCallResponse {
   scheduled_call_id: string;
   status: "pending";
-  scheduled_for: string; // normalized UTC ISO 8601
+  scheduled_for: string;
 }
 
-// --------------------------------------------------------- call-webhook ---
-
-/** Correlation metadata. Set by make-call (Bland echoes it back in P6) and
- *  included verbatim in simulated demo payloads. NEVER a source of identity:
- *  the user is resolved from the matched call_logs row; metadata is a
- *  cross-check only (R4). */
 export interface CallWebhookMetadata {
   call_log_id: string;
   user_id: string;
   is_demo: boolean;
 }
 
-/** The subset of Bland's webhook payload we consume. Simulated demo payloads
- *  use EXACTLY this shape and flow through the same parser (zod .passthrough();
- *  unknown extra fields from Bland are ignored). */
 export interface CallWebhookPayload {
-  call_id: string; //                 Bland call_id, or "demo_<uuid>"
-  to: string; //                      number called (E.164)
+  call_id: string;
+  to: string;
   from?: string | null;
   completed: boolean;
-  status: string; //                  raw provider status; normalized via BLAND_STATUS_MAP
-  corrected_duration?: number | string | null; // seconds (Bland sends string or number)
-  call_length?: number | null; //     minutes, float (Bland) — used if corrected_duration absent
-  concatenated_transcript?: string | null; // "speaker: text\n" lines
+  status: string;
+  corrected_duration?: number | string | null;
+  call_length?: number | null;
+  concatenated_transcript?: string | null;
   summary?: string | null;
   error_message?: string | null;
   answered_by?: "human" | "voicemail" | "unknown" | null;
@@ -291,14 +423,13 @@ export interface CallWebhookResponse {
   reason?: "unknown_call" | "already_processed" | "metadata_mismatch";
 }
 
-// --------------------------------------------- appointment extraction ------
-
-/** Stored in call_logs.appointment_details (JSONB). null when no appointment. */
-export interface AppointmentDetails {
-  title: string; //          e.g. "Pharmacy pickup — Walgreens"
-  start_iso: string; //      ISO 8601 WITH offset
-  end_iso: string | null; // null => assume 30 min when building the .ics
-  location: string | null;
-  notes: string | null;
-  confidence: number; //     0..1; UI flags < 0.6 as "unconfirmed"
-}
+export const BLAND_STATUS_MAP: Record<string, CallStatus> = {
+  completed: "completed",
+  complete: "completed",
+  "no-answer": "no_answer",
+  no_answer: "no_answer",
+  busy: "busy",
+  failed: "failed",
+  error: "failed",
+};
+// ========================= END TRANSITIONAL COMPAT ==========================

@@ -1,348 +1,98 @@
-# Calldone — Frozen Database Contract (final)
+# DB Contract — Calldone by Oasis (Checkpoint 3: inbound reception & intake)
 
-## 1. Conformance
+**Status: FROZEN** (Checkpoint 3, 2026-07-06). Canonical DDL:
+`supabase/migrations/20260706000000_inbound_initial_schema.sql` — **the SQL wins over this
+prose**. Enums/caps are mirrored as const arrays in `supabase/functions/_shared/api-types.ts`;
+if they ever diverge, the migration wins — report, don't patch locally. Rulings: R23–R28 in
+`decision-register.md`. The consumer-outbound schema (Checkpoint 1) is retired per R24: its
+migration file is deleted; this schema replaces it via `supabase db reset` (all tables were
+empty, pre-launch).
 
-This document is the human-readable companion to
-`supabase/migrations/00000000000000_initial_schema.sql`. It describes that
-committed migration **verbatim** and embodies the
-[decision register](decision-register.md) (rulings R1–R22). Where this prose and
-the migration ever disagree, the migration SQL and the decision register win and
-this document is wrong — **fix the doc, never the code**. The migration is frozen
-(R1): authored at baseline by the orchestrator, owned by `ws/db` thereafter;
-fixes land in this same file pre-merge, and only additive migrations follow once
-it ships.
+## 1. Model overview
 
-The schema freezes all 9 product tables (spec Phases 1–7) plus the rate-limit
-infrastructure now, even though the demo slice only exercises Phases 1–4. Tables
-and columns for cut features (`scheduled_calls`, P5/P6 privileged columns) ship
-frozen to avoid later migration churn; their *access* is locked down to match the
-slice (see R10).
+Multi-tenant by **org** (one row per nonprofit). Staff authenticate with real accounts
+(anonymous sign-in is retired, R23) and reach data only through org membership. Calls, events,
+and intake are written **exclusively by edge functions via `service_role`**; staff read them
+through RLS and work the intake/callback queues through narrow column grants.
 
-## 2. Anonymous-demo resolution
+```
+auth.users ─ profiles
+     │
+org_members (admin|staff) ── orgs ── phone_numbers
+                               │  ├── knowledge_packs ── knowledge_entries
+                               │  ├── inbound_calls ── call_events
+                               │  │        └─(set null)─ intake_records ── callback_queue
+                               │  └── (private) usage_counters
+                     (private) rate_limits
+```
 
-The demo runs on **Supabase anonymous sign-in**. The resolution baked into the
-schema:
+## 2. Tables (public schema; every table RLS-enabled)
 
-- An anonymous visitor gets a real `auth.users` row and a JWT whose Postgres role
-  is **`authenticated`** (not `anon`), carrying the claim **`is_anonymous = true`**.
-- Every RLS policy therefore targets role **`authenticated` only**. There is no
-  policy granting the `anon` role anything.
-- The `anon` Postgres role is stripped of all access as defense in depth:
-  `revoke all on all tables in schema public from anon;` and the same for
-  sequences. The landing page never queries the database, so `anon` needs nothing.
-- The `handle_new_user` trigger fires for *every* `auth.users` insert — email,
-  Google, and anonymous alike — so an anonymous visitor immediately owns a
-  `profiles` row and can CRUD their own brainstorm/script data.
-- Where anonymous users must be held back (R8), the policy checks the JWT claim:
-  `not coalesce((select (auth.jwt() ->> 'is_anonymous')::boolean), false)`.
-  Missing/false claim ⇒ a permanent user ⇒ write allowed.
-
-## 3. Per-table reference
-
-All user-owned tables FK to `public.profiles(id)`; `profiles.id` FKs to
-`auth.users(id) ON DELETE CASCADE`. Deleting an auth user erases everything they
-own. Every table has RLS enabled (§5). Three shared trigger helper functions back
-the tables; all three are `set search_path = ''` and have `execute` revoked from
-`public, anon, authenticated`:
-
-- **`set_updated_at()`** — `BEFORE UPDATE`, sets `new.updated_at = now()`.
-- **`handle_new_user()`** — `SECURITY DEFINER`, `AFTER INSERT on auth.users`;
-  inserts a `profiles` row using `display_name`/`full_name`/`name` from
-  `raw_user_meta_data` (`nullif(coalesce(...), '')`), `on conflict (id) do nothing`.
-- **`reset_phone_verification()`** — `BEFORE UPDATE on profiles`; if
-  `phone_number` changed but `phone_verified_at` was not changed in the same
-  statement, nulls `phone_verified_at` (R9).
-
-### 3.1 `profiles`
-One row per `auth.users` row (incl. anonymous), auto-created by the
-`on_auth_user_created` trigger.
-
-| Column | Type | Notes / CHECK |
+| Table | Purpose | Client writes (via RLS + column grants) |
 |---|---|---|
-| `id` | uuid PK | FK → `auth.users(id)` **ON DELETE CASCADE** |
-| `display_name` | text | `profiles_display_name_len`: null or ≤ 120 chars |
-| `phone_number` | text | `profiles_phone_e164`: null or `^\+[1-9][0-9]{1,14}$` |
-| `phone_verified_at` | timestamptz | never client-writable (R9) |
-| `time_zone` | text | `profiles_time_zone_len`: null or ≤ 64 chars |
-| `communication_style` | jsonb | NOT NULL default `'{}'`; `profiles_comm_style_object`: `jsonb_typeof = 'object'` |
-| `style_summary` | text | `profiles_style_summary_len`: null or ≤ 4000 chars; service-role-only write (P5) |
-| `created_at` | timestamptz | NOT NULL default `now()` |
-| `updated_at` | timestamptz | NOT NULL default `now()` |
+| `profiles` | 1:1 with auth.users; member identity; auto-created by `on_auth_user_created` | UPDATE own `display_name` only |
+| `orgs` | tenant root: name, slug, timezone, `answering_mode` (R26: `always\|after_hours\|overflow`), `business_hours` jsonb, `escalation_phone` (E.164; must be set before go-live — app-enforced), `notification_email`, `retention_days` (R23, default 90, 1–3650), `calls_enabled` (R28 per-org kill switch), `monthly_minutes_cap` (R28, default 300, **service-role managed — no client grant**) | INSERT (any authenticated user; trigger `on_org_created` makes creator admin); UPDATE by org **admin** on all columns except `monthly_minutes_cap` |
+| `org_members` | membership + role `admin\|staff`; PK (org_id, user_id) | admin INSERT/UPDATE/DELETE within own org; self-DELETE allowed; trigger `guard_last_admin` blocks removing/demoting the last admin |
+| `phone_numbers` | provider-provisioned numbers; `provider ∈ vapi\|retell\|twilio`; unique `e164`; partial-unique `(provider, provider_number_id)` | none (SELECT only) — provisioning is money-gated, service-role |
+| `knowledge_packs` | org FAQ pack; `status draft\|published`; **partial-unique: one published pack per org**; `version`, `published_at` | member INSERT (draft only) + UPDATE while draft; **publish/unpublish (status change) admin-only**; admin DELETE |
+| `knowledge_entries` | FAQ rows: question ≤500, answer ≤2000, keywords ≤20, position; denormalized `org_id` for RLS | member full CRUD; total published-pack budget `LIMITS.KB_PACK_MAX_CHARS` is app-enforced |
+| `inbound_calls` | one row per handled call: `provider_call_id` (unique per provider), `caller_number` (nullable — withheld caller id), status `in_progress\|completed\|transferred\|voicemail\|failed`, **`disclosure_played` boolean NOT NULL (R28)**, `language en\|es` (R27), `escalation none\|transferred\|voicemail` (R26), `transcript` jsonb array, `summary` ≤4000, `summary_emailed_at`, `error_reason` | **none** — SELECT only; all writes service-role (R5 pattern) |
+| `intake_records` | the call's structured outcome (org CRM value): caller_name, need ≤2000, callback_number (E.164), **`callback_consent` boolean NOT NULL (R23)**, preferred_time, `appointment` jsonb (`AppointmentDetails` shape), status `new\|in_review\|done`, staff_notes; `call_id` is **ON DELETE SET NULL** so retention purges never destroy intake | member UPDATE of `status` + `staff_notes` only; INSERT/DELETE service-role |
+| `callback_queue` | **the ONLY outbound surface (R23)**: intake_id, `consent_call_id` (provenance; SET NULL on purge) + **`consent_recorded_at` NOT NULL** (survives purge), callback_number, status `pending\|approved\|calling\|done\|canceled`, scheduled_for, attempts ≤10 | member UPDATE of `status` + `scheduled_for`; trigger `guard_callback_rules` allows staff only `pending→approved\|canceled`, `approved→canceled`; **INSERT service-role only and rejected unless the linked intake has `callback_consent = true`** |
+| `call_events` | normalized `CallEvent` audit log (R25): provider, `provider_event_id` (**partial-unique per provider = ingestion idempotency**), type, payload jsonb | none; SELECT is **admin-only** (raw payloads); writes service-role |
 
-Triggers: `trg_profiles_updated_at` (set_updated_at), `trg_profiles_phone_reset`
-(reset_phone_verification). No INSERT (trigger-only) and no DELETE
-(cascade-from-auth-only) is exposed to clients.
+### private schema (never API-exposed)
+- `private.rate_limits (bucket, key, window_start, count)` — R6 pattern carried forward (R28).
+- `private.usage_counters (org_id, month, minutes_used)` — R28 monthly minutes ledger.
 
-### 3.2 `user_facts`
-RAG memory; upsert by `(user_id, key)`. Anonymous sessions may not write (R8).
+## 3. Functions & triggers
 
-| Column | Type | Notes / CHECK |
-|---|---|---|
-| `id` | uuid PK | default `gen_random_uuid()` |
-| `user_id` | uuid | NOT NULL, FK → `profiles(id)` **ON DELETE CASCADE** |
-| `key` | text | NOT NULL; `user_facts_key_len`: 1–100 chars |
-| `value` | text | NOT NULL; `user_facts_value_len`: 1–2000 chars |
-| `source` | text | NOT NULL default `'manual'`; `user_facts_source_enum`: `onboarding`/`brainstorm`/`manual` |
-| `confidence` | real | NOT NULL default `1.0`; `user_facts_confidence_range`: 0–1 |
-| `created_at` | timestamptz | NOT NULL default `now()` |
-| `updated_at` | timestamptz | NOT NULL default `now()` |
-| — | | `user_facts_user_key_unique` UNIQUE `(user_id, key)` (enables upsert) |
+| Object | Contract |
+|---|---|
+| `public.rate_limit_hit(bucket, key, window, amount=1) → int` | SECURITY DEFINER, atomic upsert-increment, rejects windows ∉ hour/day/month; **EXECUTE: service_role only** |
+| `public.usage_add_minutes(org, minutes) → numeric` | SECURITY DEFINER; increments the org's current-month ledger, returns new total; edge compares to `orgs.monthly_minutes_cap`; **EXECUTE: service_role only** |
+| `private.is_org_member/is_org_admin(org)` | SECURITY DEFINER STABLE membership checks (locked `search_path`) used by every policy |
+| `private.handle_new_user` | trigger on `auth.users` insert → creates `profiles` row |
+| `private.handle_new_org` | trigger on `orgs` insert → creator becomes admin (skipped for service-role inserts where `auth.uid()` is null) |
+| `private.guard_last_admin` | blocks demoting/deleting an org's last admin |
+| `private.guard_callback_rules` | INSERT: requires linked intake `callback_consent = true` (R23); UPDATE: staff transitions limited to `pending→approved\|canceled`, `approved→canceled`; service-role unrestricted |
+| `private.touch_updated_at` | `updated_at` maintenance on orgs / packs / entries / intake / callbacks |
+| `private.purge_expired_call_content()` | R23 retention: deletes `call_events` and ended `inbound_calls` older than **each org's** `retention_days` (intake + consent provenance survive via SET NULL + `consent_recorded_at`); prunes `private.rate_limits` (2-day hour/day rows, 35-day month rows) |
 
-Trigger: `trg_user_facts_updated_at`.
+**pg_cron**: one guarded job `calldone-retention-purge` daily 03:10 UTC → `purge_expired_call_content()`. The DO-block guard keeps envs without pg_cron applying cleanly (R15 pattern).
 
-### 3.3 `brainstorm_sessions`
-`transcript` is a JSONB array of `{role: "user"|"assistant", text, audio_url?}`;
-`audio_url` stays null in Phases 1–4 (audio is never stored).
+## 4. Grants (deny-by-default)
 
-| Column | Type | Notes / CHECK |
-|---|---|---|
-| `id` | uuid PK | default `gen_random_uuid()` |
-| `user_id` | uuid | NOT NULL, FK → `profiles(id)` **ON DELETE CASCADE** |
-| `transcript` | jsonb | NOT NULL default `'[]'`; `brainstorm_sessions_transcript_array`: `jsonb_typeof = 'array'` |
-| `resulting_script_id` | uuid | FK → `call_scripts(id)` **ON DELETE SET NULL** (added after `call_scripts` to close the circular ref) |
-| `created_at` | timestamptz | NOT NULL default `now()` |
-| `updated_at` | timestamptz | NOT NULL default `now()` |
+- **`anon` has NOTHING**: `revoke all on all tables/functions in schema public from anon` — there is no anonymous product surface (R23). `enable_anonymous_sign_ins = false` in config.toml.
+- `authenticated`: table-level SELECT on all product tables (**RLS narrows rows**); writes only via the column grants in §2.
+- `service_role`: full (edge functions).
+- `private` schema: usage revoked from anon/authenticated; RPCs are the only doorway.
 
-Trigger: `trg_brainstorm_sessions_updated_at`.
+## 5. What the ws/db repurpose owes (test contract)
 
-### 3.4 `call_scripts`
+The old SQL/RLS suite (ws/db branch) targets the retired schema; it is rewritten against this
+one. Minimum assertions (basis of re-frozen `security.md` §10 ws/db):
 
-| Column | Type | Notes / CHECK |
-|---|---|---|
-| `id` | uuid PK | default `gen_random_uuid()` |
-| `user_id` | uuid | NOT NULL, FK → `profiles(id)` **ON DELETE CASCADE** |
-| `script_text` | text | NOT NULL; `call_scripts_text_len`: 1–20000 chars |
-| `call_purpose` | text | `call_scripts_purpose_len`: null or ≤ 500 chars |
-| `source` | text | NOT NULL default `'brainstorm'`; `call_scripts_source_enum`: `brainstorm`/`manual_edit`/`duplicated` |
-| `brainstorm_session_id` | uuid | FK → `brainstorm_sessions(id)` **ON DELETE SET NULL** |
-| `is_favorite` | boolean | NOT NULL default `false` |
-| `created_at` | timestamptz | NOT NULL default `now()` |
-| `updated_at` | timestamptz | NOT NULL default `now()` |
+1. RLS enabled on all 10 public tables; `anon` role: zero access to every table and RPC.
+2. **Cross-org isolation**: a member of org A sees zero rows of org B on every org-scoped table.
+3. Role enforcement: staff cannot UPDATE `orgs`; admin can (except `monthly_minutes_cap`,
+   which even admin cannot — service-role only); staff can edit draft KB but cannot publish.
+4. `inbound_calls` / `call_events` / `intake_records` / `callback_queue` / `phone_numbers`:
+   client INSERT rejected (and client UPDATE limited to the granted columns on intake/callback).
+5. `guard_callback_rules`: service-role INSERT without consent → error; staff `pending→done` → error;
+   `pending→approved` → ok.
+6. `guard_last_admin`: demoting/deleting the only admin → error.
+7. `rate_limit_hit` atomic under concurrency, invalid window rejected, EXECUTE denied to
+   authenticated/anon. Same EXECUTE denial for `usage_add_minutes`.
+8. Retention: with `retention_days = 1` and back-dated rows, `purge_expired_call_content()`
+   removes the call + events but the intake row and `callback_queue.consent_recorded_at` survive.
+9. Cascade: deleting an org leaves zero orphans in any org-scoped table.
+10. `disclosure_played` exists NOT NULL default false (R28 anchor for the edge suite).
 
-Trigger: `trg_call_scripts_updated_at`.
+## 6. Regeneration & drift
 
-### 3.5 `script_edit_events`
-Append-only style-learning signal. Client may SELECT and INSERT only; anonymous
-sessions may not write (R8).
-
-| Column | Type | Notes / CHECK |
-|---|---|---|
-| `id` | uuid PK | default `gen_random_uuid()` |
-| `user_id` | uuid | NOT NULL, FK → `profiles(id)` **ON DELETE CASCADE** |
-| `script_id` | uuid | NOT NULL, FK → `call_scripts(id)` **ON DELETE CASCADE** |
-| `original_text` | text | NOT NULL; `script_edit_events_original_len`: ≤ 20000 chars |
-| `edited_text` | text | NOT NULL; `script_edit_events_edited_len`: ≤ 20000 chars |
-| `created_at` | timestamptz | NOT NULL default `now()` |
-
-No `updated_at`, no update trigger (append-only).
-
-### 3.6 `call_logs`
-INSERT by `make-call` (service role); UPDATE by `call-webhook` (service role).
-Demo calls use a `bland_call_id` prefixed `demo_` and must still be E.164 in
-`phone_number_called`. `is_demo` defaults TRUE as the safety posture (R5).
-
-| Column | Type | Notes / CHECK |
-|---|---|---|
-| `id` | uuid PK | default `gen_random_uuid()` |
-| `user_id` | uuid | NOT NULL, FK → `profiles(id)` **ON DELETE CASCADE** |
-| `script_id` | uuid | FK → `call_scripts(id)` **ON DELETE SET NULL** |
-| `bland_call_id` | text | `call_logs_bland_id_len`: null or ≤ 128 chars |
-| `is_demo` | boolean | NOT NULL default `true` |
-| `phone_number_called` | text | `call_logs_phone_e164`: null or `^\+[1-9][0-9]{1,14}$` |
-| `status` | text | NOT NULL default `'initiated'`; `call_logs_status_enum`: `initiated`/`ringing`/`completed`/`failed`/`no_answer`/`busy` |
-| `transcript` | text | nullable |
-| `duration_seconds` | integer | `call_logs_duration_nonneg`: null or ≥ 0 |
-| `appointment_details` | jsonb | `call_logs_appt_object`: null or `jsonb_typeof = 'object'` |
-| `confirmation_detected` | boolean | NULL = extraction not yet run |
-| `error_reason` | text | nullable |
-| `created_at` | timestamptz | NOT NULL default `now()` |
-| `updated_at` | timestamptz | NOT NULL default `now()` |
-
-Trigger: `trg_call_logs_updated_at`. Added to the `supabase_realtime`
-publication (guarded) for optional live call-status subscriptions; RLS still gates
-subscribers.
-
-### 3.7 `scheduled_calls`
-P6 feature; schema frozen now, clients SELECT-only until P6 (R10).
-
-| Column | Type | Notes / CHECK |
-|---|---|---|
-| `id` | uuid PK | default `gen_random_uuid()` |
-| `user_id` | uuid | NOT NULL, FK → `profiles(id)` **ON DELETE CASCADE** |
-| `script_id` | uuid | NOT NULL, FK → `call_scripts(id)` **ON DELETE CASCADE** |
-| `scheduled_for` | timestamptz | NOT NULL |
-| `phone_number` | text | NOT NULL; `scheduled_calls_phone_e164`: `^\+[1-9][0-9]{1,14}$` |
-| `status` | text | NOT NULL default `'pending'`; `scheduled_calls_status_enum`: `pending`/`placed`/`failed`/`cancelled` |
-| `call_log_id` | uuid | FK → `call_logs(id)` **ON DELETE SET NULL** |
-| `attempt_count` | integer | NOT NULL default `0`; `scheduled_calls_attempts_range`: 0–10 |
-| `last_error` | text | nullable |
-| `created_at` | timestamptz | NOT NULL default `now()` |
-| `updated_at` | timestamptz | NOT NULL default `now()` |
-
-Trigger: `trg_scheduled_calls_updated_at`.
-
-### 3.8 `script_feedback`
-One row per `(user, script)`: 1 = thumbs down, 5 = thumbs up; upsert to toggle.
-Anonymous sessions may not write (R8).
-
-| Column | Type | Notes / CHECK |
-|---|---|---|
-| `id` | uuid PK | default `gen_random_uuid()` |
-| `user_id` | uuid | NOT NULL, FK → `profiles(id)` **ON DELETE CASCADE** |
-| `script_id` | uuid | NOT NULL, FK → `call_scripts(id)` **ON DELETE CASCADE** |
-| `rating` | smallint | NOT NULL; `script_feedback_rating_range`: 1–5 |
-| `note` | text | `script_feedback_note_len`: null or ≤ 2000 chars |
-| `created_at` | timestamptz | NOT NULL default `now()` |
-| — | | `script_feedback_user_script_unique` UNIQUE `(user_id, script_id)` |
-
-No `updated_at`, no update trigger.
-
-### 3.9 `anonymous_events`
-Aggregate analytics, no PII (metadata keys whitelisted in code: counts/types
-only). Inserts/reads via service role only — zero client access whatsoever.
-
-| Column | Type | Notes / CHECK |
-|---|---|---|
-| `id` | bigint PK | `generated always as identity` |
-| `event_type` | text | NOT NULL; `anonymous_events_type_len`: 1–100 chars |
-| `metadata` | jsonb | NOT NULL default `'{}'`; `anonymous_events_metadata_object`: `jsonb_typeof = 'object'` |
-| `created_at` | timestamptz | NOT NULL default `now()` |
-
-## 4. Rate-limit infrastructure (R6)
-
-A dedicated **`private` schema** (not exposed via PostgREST) holds the counters,
-reached solely through one `SECURITY DEFINER` RPC.
-
-**`private.rate_limits`** — fixed-window counters:
-
-| Column | Type | Notes |
-|---|---|---|
-| `bucket` | text | NOT NULL — the canonical `RATE_LIMITS.<key>.bucket` strings from `api-types.ts` (api.md §8), e.g. `'make_call:ip'`, `'tts_chars:global'` |
-| `key` | text | NOT NULL — ip, user_id, or `'global'` |
-| `window_start` | timestamptz | NOT NULL — `date_trunc('hour'|'day'|'month', now())` |
-| `count` | integer | NOT NULL default `0` |
-| — | | PRIMARY KEY `(bucket, key, window_start)` |
-
-**`public.rate_limit_hit(p_bucket text, p_key text, p_window text, p_amount integer default 1) returns integer`**
-— `SECURITY DEFINER` (owner postgres), `set search_path = ''`:
-
-- Validates `p_window in ('hour','day','month')`, else raises.
-- `v_window_start := date_trunc(p_window, now())`.
-- Atomic upsert on `(bucket, key, window_start)`: inserts `greatest(p_amount, 0)`,
-  on conflict adds `greatest(p_amount, 0)` to the existing count.
-- Returns the new running count (`integer`).
-
-`execute` is **revoked from `public, anon, authenticated`** and **granted to
-`service_role` only**. No role needs direct access to the `private` schema; the
-RPC is the sole access path. Index `idx_rate_limits_window` on `(window_start)`
-supports the daily cleanup (§6).
-
-## 5. RLS access matrix
-
-RLS is enabled on **all 10 tables** (9 product tables + `private.rate_limits`).
-Policies target role `authenticated` only; `service_role` bypasses RLS entirely.
-"Authenticated (incl. anonymous)" means the policy applies to both, **except** the
-anon-deny columns called out below. Privileges are reset
-(`revoke all ... from anon` and `from authenticated`) then re-granted precisely —
-the grants below are the second gate under RLS (defense in depth).
-
-| Table | SELECT | INSERT | UPDATE | DELETE | Service-role-only |
-|---|---|---|---|---|---|
-| `profiles` | own row | — (trigger-only) | own row, cols `display_name, phone_number, time_zone, communication_style` | — (cascade-only) | `phone_verified_at`, `style_summary`, `created_at`, `updated_at` writes |
-| `user_facts` | own | own **non-anon** (R8) | own **non-anon**, cols `value, source, confidence` (R8) | own | — |
-| `brainstorm_sessions` | own | own (anon OK) | own (anon OK), cols `transcript, resulting_script_id` | own | — |
-| `call_scripts` | own | own (anon OK) | own (anon OK), cols `script_text, call_purpose, is_favorite` | own | — |
-| `script_edit_events` | own | own **non-anon** (R8) | — (append-only) | — | — |
-| `call_logs` | own | **service-role only** (R5) | **service-role only** (R5) | **service-role only** | all writes (make-call inserts, call-webhook updates) |
-| `scheduled_calls` | own | — (R10) | — (R10) | — (R10) | all writes until P6 |
-| `script_feedback` | own | own **non-anon** (R8) | own **non-anon**, cols `rating, note` (R8) | own | — |
-| `anonymous_events` | — | — | — | — | **all access** (RLS enabled, zero policies, no grants) |
-| `private.rate_limits` | — | — | — | — | **all access** (zero policies/grants; touched only via `rate_limit_hit`) |
-
-Callouts (exactly as enforced in the SQL):
-
-- **R8** — anonymous sessions are **denied INSERT and UPDATE** on `user_facts`,
-  `script_edit_events`, and `script_feedback`. The `_non_anon` policies add
-  `and not coalesce((select (auth.jwt() ->> 'is_anonymous')::boolean), false)` to
-  both `using` and `with check`. Anonymous users *can* SELECT/DELETE their own
-  `user_facts`/`script_feedback` and SELECT their `script_edit_events`; they have
-  full CRUD on their own `brainstorm_sessions`/`call_scripts`.
-- **R9** — `phone_number` is client-writable (it appears in the `profiles` UPDATE
-  column grant); `phone_verified_at` is **never** client-writable (absent from the
-  grant) and the `reset_phone_verification` trigger voids it on any phone change.
-- **R10** — `scheduled_calls` is **SELECT-only** for clients: a single
-  `scheduled_calls_select_own` policy and a bare `grant select`, no
-  INSERT/UPDATE/DELETE policies or grants until P6.
-- **R5** — `call_logs` has **only** a SELECT policy (`call_logs_select_own`) and
-  only `grant select`. All writes are service-role-only.
-- `anonymous_events` and `private.rate_limits` have RLS enabled with **zero
-  policies and zero grants** to `anon`/`authenticated` — only `service_role`
-  (RLS bypass) or the `SECURITY DEFINER` RPC can reach them.
-
-`(select auth.uid())` / `(select auth.jwt() ...)` wrappers are intentional:
-they cache per statement (initplan) for RLS performance.
-
-## 6. R15 retention
-
-Scheduled jobs are set up inside a guarded `DO` block so environments **without
-`pg_cron` still apply the migration cleanly**: `create extension if not exists
-pg_cron` is wrapped in an exception handler (`raise notice` on failure), and the
-two jobs are scheduled only `if exists (select 1 from pg_extension where extname =
-'pg_cron')`.
-
-- **`purge-anonymous-users`** — cron `0 4 * * *`:
-  `delete from auth.users where is_anonymous and created_at < now() - interval '24 hours'`.
-  Every FK chain cascades from `auth.users` → `profiles` → all user-owned tables,
-  so a purged anonymous user's profile, transcripts, scripts, and call logs vanish
-  with them (zero orphans).
-- **`cleanup-rate-limits`** — cron `30 4 * * *`:
-  `delete from private.rate_limits where window_start < now() - interval '2 days'`.
-
-## 7. RLS acceptance tests (ws/db)
-
-SQL/RLS policy tests run against `supabase db reset` (R21). Each item is
-independently testable:
-
-1. **RLS enabled on all 10 tables** — `relrowsecurity = true` for the 9 `public`
-   product tables and `private.rate_limits`.
-2. **Cross-user isolation** — as user A, SELECT/UPDATE/DELETE of user B's rows in
-   every owned table returns zero rows / affects zero rows.
-3. **Anon-deny works (R8)** — with a JWT carrying `is_anonymous = true`, INSERT or
-   UPDATE on `user_facts`, `script_edit_events`, and `script_feedback` is rejected,
-   while INSERT on the same user's `brainstorm_sessions`/`call_scripts` succeeds.
-4. **`call_logs` has no client write** — as `authenticated`, INSERT/UPDATE/DELETE
-   on `call_logs` fails (no policy + no grant); SELECT of own rows succeeds; a
-   `service_role` INSERT/UPDATE succeeds.
-5. **`phone_verified_at` not client-writable (R9)** — UPDATE setting
-   `phone_verified_at` as `authenticated` fails (column not granted); changing
-   `phone_number` alone nulls any prior `phone_verified_at` via the trigger.
-6. **`scheduled_calls` SELECT-only (R10)** — `authenticated` SELECT of own rows
-   succeeds; INSERT/UPDATE/DELETE fails.
-7. **`anonymous_events` / `rate_limits` zero client access** — `authenticated`
-   SELECT/INSERT on either fails; both are reachable only via `service_role` /
-   `rate_limit_hit`.
-8. **Cascade leaves zero orphans** — deleting an anonymous `auth.users` row (the
-   R15 purge predicate) cascades to `profiles` and every owned table, leaving no
-   rows referencing the deleted user across all tables.
-9. **`rate_limit_hit` increments atomically** — repeated calls within the same
-   fixed window return a monotonically increasing count; an invalid `p_window`
-   raises; execute is denied to `authenticated`/`anon` and allowed to
-   `service_role`.
-
-## 8. Frozen vs may-evolve
-
-**Frozen (this migration is the law; only additive migrations after it ships,
-owned by `ws/db`):** all 9 product tables and their columns, CHECK constraints,
-FK/ON DELETE behavior, the three trigger functions and their triggers,
-`private.rate_limits` + `rate_limit_hit`, all RLS policies, the precise grant set,
-the realtime publication add, the pg_cron jobs, and every index. The E.164 regex,
-status enums, and numeric caps mirror `_shared/api-types.ts` (R3/R17) — that file
-is the single source for the API-side copies; the DB CHECKs restate the same
-values as the database gate.
-
-**May evolve (additively, post-merge):** new tables/columns for P5/P6 features
-(personalization summarizer, `schedule-call` + cron execution) and the
-client-facing access to `scheduled_calls` (INSERT/UPDATE policies + grants), all
-introduced by *new* migration files — never by editing this baseline. Rate-limit
-*numbers* live in `api-types.ts` and can be tuned there without a schema change
-(the `private.rate_limits` shape is fixed).
+- `src/types/database.ts` is regenerated from this schema (R14) **during the worker repurpose**
+  — until then the baseline file still mirrors the retired schema and compiles against the
+  transitional-compat section of api-types.ts.
+- Additive migrations are forbidden until v1 ships; defects in this file are fixed in place
+  pre-integration (R1 pattern) with a register note.

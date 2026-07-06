@@ -21,8 +21,8 @@ port = 54322
 # Port used by db diff command to initialize the shadow database.
 shadow_port = 54320
 # The database major version to use. This has to be the same as your remote database's. Run `SHOW
-# server_version;` on the remote database to check.
-major_version = 15
+# server_version;` on the remote database to check. (Live project nrlbqdskrzrqenigbkuh runs PG 17.)
+major_version = 17
 
 [db.pooler]
 enabled = false
@@ -37,6 +37,11 @@ max_client_conn = 100
 
 [realtime]
 enabled = true
+
+# Local log pipeline (vector/logflare) needs the Docker socket at a path Colima
+# doesn't provide; not needed for local db/RLS work. Hosted logging unaffected.
+[analytics]
+enabled = false
 
 [studio]
 enabled = true
@@ -77,9 +82,9 @@ enable_refresh_token_rotation = true
 refresh_token_reuse_interval = 10
 # Allow/disallow new user signups to your project.
 enable_signup = true
-# Every demo visitor gets a real Supabase session via signInAnonymously() (security.md §1.1).
-# The hosted dashboard additionally lowers the anonymous sign-in rate limit to 10/hour/IP.
-enable_anonymous_sign_ins = true
+# R23 (Checkpoint 3): anonymous sign-in was a consumer-demo assumption and is
+# RETIRED. Org staff authenticate with real accounts + roles. Never re-enable.
+enable_anonymous_sign_ins = false
 
 [auth.email]
 # Allow/disallow new user signups via email to your project.
@@ -90,23 +95,17 @@ double_confirm_changes = true
 # If enabled, users need to confirm their email address before signing in.
 enable_confirmations = false
 
-# Edge Functions config. Each function gets its own block (security.md §1.5).
-# JWT-protected functions still re-verify the user via auth.getUser() in
-# _shared/auth.ts because the bare anon key passes the platform gate (§1.3).
-# The `private` schema is deliberately NOT added to [api] schemas (R6).
+# Edge Functions config (Checkpoint 3, R25). Both inbound functions are
+# server-to-server (called by the voice provider, not by browsers), so the
+# platform JWT gate is off and each enforces its own auth in code:
+#   provider-webhook — per-adapter provider-signature verification against
+#                      PROVIDER_WEBHOOK_SECRET (401 on unsigned/mis-signed).
+#   agent-brain      — constant-time check of x-calldone-brain-secret against
+#                      BRAIN_SECRET (Vapi custom-LLM custom header).
+# The `private` schema is deliberately NOT added to [api] schemas (R6 pattern).
 
-[functions.whisper-transcribe]
-verify_jwt = true
+[functions.provider-webhook]
+verify_jwt = false
 
-[functions.gemini-conversation]
-verify_jwt = true
-
-[functions.elevenlabs-tts]
-verify_jwt = true
-
-[functions.make-call]
-verify_jwt = true
-
-# call-webhook authenticates via HMAC signature (security.md §4), not JWT.
-[functions.call-webhook]
+[functions.agent-brain]
 verify_jwt = false
