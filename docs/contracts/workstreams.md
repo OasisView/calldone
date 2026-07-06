@@ -1,5 +1,11 @@
 # Calldone Rebuild — Phase 2: Parallel Workstreams (Checkpoint 2)
 
+> **⚠️ SUPERSEDED BY CHECKPOINT 3 (2026-07-06, R23–R28).** The product pivoted to inbound
+> AI reception & intake for nonprofits; the worker scopes and prompts below describe the
+> retired consumer-outbound slice. Current ownership + repurposing map: `frontend.md` §3;
+> current worker scopes derive from the re-frozen `db.md` / `api.md` / `security.md`.
+> This file is kept as the Checkpoint-2 historical record.
+
 Decomposes the paid-backend build into **5 non-overlapping workstreams**. Each owns a disjoint
 set of files (per `frontend.md` §8), builds against the frozen contracts in `docs/contracts/`,
 bakes in security, and writes its own tests. The orchestrator owns the shared baseline and the
