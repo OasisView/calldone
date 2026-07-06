@@ -1,4 +1,44 @@
-# Calldone Rebuild — Decision Register (Checkpoint 1, approved 2026-06-10)
+# Calldone — Decision Register
+
+> **Checkpoint 3 (2026-07-06) is in force.** Rulings R23–R28 below pivot the product to
+> **inbound AI reception & intake for small nonprofits** ("Calldone by Oasis") and open a
+> full contract re-freeze. Where a Checkpoint 1 ruling conflicts with R23–R28 or with the
+> re-frozen contract docs, **Checkpoint 3 wins.** Checkpoint 1 rulings survive as *patterns*
+> where noted (canonical-types, rate-limit RPC, HMAC verification, retention cron, frozen-file
+> ownership, test strategy, CI hardening, .ics single-source); rulings tied to the consumer
+> outbound slice (R2, R4, R5, R7, R8, R10, R16, R19) are **superseded**.
+
+---
+
+## Checkpoint 3 — Oasis Alignment (approved 2026-07-06)
+
+Verdict context: a four-agent review council returned **REMAKE** on the consumer outbound
+concept (commoditized me-too; Google ships outbound calling free in Search; traction/funding
+are B2B; the $0 model collapses the moment real outbound calls exist). This checkpoint changes
+**strategy, not process** — the frozen-contract + decision-register + contract-check/security-pass
+discipline still governs. `main` (the $0 browser demo) stays frozen; the real product still
+splits into its own app (`calldone-app`).
+
+| # | Ruling |
+|---|---|
+| R23 | **Beachhead locked: inbound AI reception & intake agent for small nonprofits.** The elderly/accessibility concept is preserved as the **Phase 2 expansion hypothesis**, not the beachhead. Rationale: inbound answering sits outside the TCPA outbound AI-voice consent regime; distribution is built in through the Oasis 50 nonprofit cohorts; B2B monthly pricing fixes the unit economics that killed the $0 consumer framing; senior-serving nonprofits later bridge to the accessibility market. v1 product: per-org dedicated number → warm disclosure at pickup (recorded + AI-assisted, natural phrasing, never removed) → FAQs from an org **knowledge pack** → structured **intake** (caller name, need, callback number, explicit callback-consent y/n, preferred time) → appointments + `.ics` → transcript + structured summary emailed to staff and written to the dashboard. **Human escalation is a v1 requirement** (say "person" / press 0 → staff transfer; no-answer → priority-flagged voicemail). **Outbound exists ONLY as a consented callback queue** (callers who said yes on an inbound call, consent referenced on the call, behind spend cap + non-anonymous gate + kill switch). No cold calls, ever. Hard gate: **no crisis-adjacent or sensitive hotlines in v1** — pilot only low-stakes lines (volunteer coordination, donation hours, program info). Data rules: transcripts + intake belong to the org; strict org-scoped RLS; **no cross-org learning database on call content** (policy, not just deferral); per-org retention, default 90 days, org-configurable deletion. |
+| R24 | **Migration strategy: full rewrite, not additive.** All 10 tables are empty; the product is pre-launch. The applied outbound migration is NOT edited in place: the old initial migration file is **deleted** and a new inbound initial schema is authored fresh (`supabase/migrations/20260706000000_inbound_initial_schema.sql`), applied via `supabase db reset` locally and a reset of the (empty) remote project at integration. (Alternative considered and rejected: additive migration layered on the consumer-outbound schema.) |
+| R25 | **Telephony architecture: managed inbound for v1** (Vapi / Retell / Bland inbound) — elevated from detail to fork because it determines ws/edge's fundamental shape: webhook consumer + function-call handler (managed) vs realtime media server (raw Twilio). Supabase Deno edge functions have execution-time limits unsuited to long-lived audio streams. The provider integration lives behind the R12-pattern abstraction: a **normalized internal `CallEvent` schema** (canonical in `_shared/api-types.ts`) **+ thin per-provider adapters**; no provider type leaks past the adapter. The provider absorbs telephony + STT + TTS + turn-taking (the old Groq-Whisper / ElevenLabs stack lines are retired from the call path; Gemini stays as the brain). **The provisional provider pick is recorded here BEFORE webhook ingestion is written** — see R25a. Twilio-direct becomes a post-launch cost-optimization checkpoint. |
+| R25a | *Provisional provider pick:* **PENDING — evaluation in progress this checkpoint** (scored on: per-turn HTTPS vs long-lived-WebSocket integration fit with edge functions, Gemini-as-brain custom-LLM support, disclosure control, transfer/DTMF escalation, voicemail detection, Spanish quality for the R27 fast-follow, pricing/caps/kill-switch, trial + test numbers). Recorded in this file the moment the evaluation lands; account creation and any number purchase are **money-gated** (explicit user approval). |
+| R26 | **Answering mode per org:** setting `always \| after_hours \| overflow` (overflow = ring staff first, answer on no-pickup). Captured as an onboarding question, stored in org settings. Escalation fallback defined: if the staff transfer target does not answer, take a **priority-flagged voicemail**. |
+| R27 | **Language scope v1: English-first with a graceful Spanish handoff.** The agent converses in English; a Spanish-first caller gets one natural Spanish line routing them into the R26 escalation path (staff transfer → priority voicemail) — nobody is dropped. Bilingual EN/ES is the immediate fast-follow; **the R25 evaluation still scores Spanish quality** so the fast-follow cannot force a provider switch. (NYC pilot reality: a meaningful share of callers will be Spanish-first.) |
+| R28 | **Guardrail carry-forward (anti-drop clause):** the prepaid spend cap, non-anonymous gate, kill switch (`CALLS_ENABLED` global + per-org `calls_enabled`), and warm-disclosure enforcement migrate **explicitly into the re-frozen `security.md` §10 acceptance criteria** — the contract rewrite cannot silently drop them. Disclosure remains enforced in code with a unit test (R22 pattern), and `inbound_calls.disclosure_played` must be recorded per call. |
+
+**Workstream repurposing under R23:** `ws/edge` remains the critical path and is built FIRST
+against the re-frozen `api.md`. `ws/calls-ui` → org **staff dashboard** (call review + history).
+`ws/brainstorm-ui` → **org onboarding / knowledge-pack builder** (the voice UI teaches Calldone
+about the org). `ws/auth-ui` → **real org auth with roles (admin, staff)** — anonymous sign-in
+was a consumer-demo assumption and is retired. All four built branches rebase onto the CI-fixed
+`rebuild/baseline` and PR into an **integration branch, never `main`**.
+
+---
+
+# Checkpoint 1 (approved 2026-06-10) — historical; superseded where in conflict with Checkpoint 3
 
 These rulings reconcile the four independently drafted contracts (db, api, frontend, security)
 after adversarial review found cross-draft contradictions. **The four final contract docs in
